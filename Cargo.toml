@@ -1,0 +1,53 @@
+[package]
+name = "biolance"
+version = "0.1.0"
+edition = "2021"
+description = "A fast, columnar multi-sample variant store powered by Lance"
+license = "MIT"
+
+[[bin]]
+name = "biolance"
+path = "src/main.rs"
+
+[lib]
+name = "biolance"
+path = "src/lib.rs"
+
+[dependencies]
+# VCF / BCF / BGZF parsing
+noodles = { version = "0", features = ["vcf", "bcf", "bgzf", "csi"] }
+
+# Lance columnar store
+lancedb = "0"
+
+# Arrow columnar types (pinned to match lancedb 0.27's transitive dep)
+arrow-array = "=57.3.0"
+arrow-schema = "=57.3.0"
+
+# Stream combinators for consuming LanceDB query results
+futures = "0.3"
+
+# Async runtime (lancedb requires tokio)
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Parallelism
+rayon = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Progress reporting
+indicatif = "0"
+
+# Timestamps (sample registry: ingested_at)
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

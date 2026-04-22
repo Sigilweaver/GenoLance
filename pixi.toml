@@ -1,0 +1,13 @@
+[workspace]
+name = "biolance"
+version = "0.1.0"
+description = "Bioinformatics CLI tools for the BioLance dev environment"
+channels = ["conda-forge", "bioconda"]
+platforms = ["linux-64"]
+
+[dependencies]
+# VCF/BAM/BGZF tooling used for validation and preprocessing
+bcftools = "*"
+samtools = "*"
+htslib = "*"
+libprotobuf = ">=6.34.1,<7"

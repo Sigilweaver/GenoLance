@@ -1,0 +1,2 @@
+[env]
+PROTOC = { value = ".pixi/envs/default/bin/protoc", relative = true, force = true }

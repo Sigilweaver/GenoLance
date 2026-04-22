@@ -1,0 +1,19 @@
+# Build output
+target/
+
+# Pixi environment (auto-installed from pixi.toml + pixi.lock)
+.pixi/
+
+# Cargo build artefacts
+**/*.rs.bk
+
+# Local test stores and scratch exports
+/tmp/
+*.roundtrip.vcf
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
