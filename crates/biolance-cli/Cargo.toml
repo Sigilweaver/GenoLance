@@ -1,0 +1,17 @@
+[package]
+name = "biolance-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Command-line interface for BioLance"
+license = "MIT"
+
+[[bin]]
+name = "biolance"
+path = "src/main.rs"
+
+[dependencies]
+biolance-core     = { workspace = true }
+biolance-variants = { workspace = true }
+tokio             = { workspace = true }
+clap              = { workspace = true }
+anyhow            = { workspace = true }

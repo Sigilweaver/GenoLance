@@ -22,8 +22,8 @@ use noodles::vcf::{
     variant::record::{info::field::Value as InfoValue, AlternateBases},
 };
 
-use crate::schema::VARIANTS_TABLE;
-use crate::store::Store;
+use biolance_core::schema::VARIANTS_TABLE;
+use biolance_core::store::Store;
 
 type Key = (String, u64, String, String);
 
@@ -43,13 +43,13 @@ pub async fn run(
     }
 
     let store = Store::open(store_path).await?;
-    let tables = store.conn.table_names().execute().await?;
+    let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!("store has no '{VARIANTS_TABLE}' table"));
     }
 
     // 1. Pull sample variants for the region.
-    let variants = store.conn.open_table(VARIANTS_TABLE).execute().await?;
+    let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
     let mut preds = vec![format!("sample_name = '{}'", sql_escape(sample_name))];
     if let Some(c) = chrom {
         // Accept either "chr17" or "17" — match both forms in the store.

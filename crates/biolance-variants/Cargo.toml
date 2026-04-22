@@ -1,0 +1,20 @@
+[package]
+name = "biolance-variants"
+version = "0.1.0"
+edition = "2021"
+description = "Variant ingest, query, annotation and clinical screening for BioLance"
+license = "MIT"
+
+[dependencies]
+biolance-core = { workspace = true }
+noodles      = { workspace = true }
+lancedb      = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+futures      = { workspace = true }
+tokio        = { workspace = true }
+rayon        = { workspace = true }
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+indicatif    = { workspace = true }
+chrono       = { workspace = true }

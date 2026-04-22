@@ -14,9 +14,9 @@ use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UI
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use crate::gene_lists::{gene_in_set, ACMG_SF_V3};
-use crate::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
-use crate::store::Store;
+use biolance_core::gene_lists::{gene_in_set, ACMG_SF_V3};
+use biolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
+use biolance_core::store::Store;
 
 type Key = (String, u64, String, String);
 
@@ -48,7 +48,7 @@ const DEFAULT_SIGNIFICANCE: &str = "pathogenic";
 
 pub async fn run(store_path: &str, sample: &str, f: &Filters) -> Result<()> {
     let store = Store::open(store_path).await?;
-    let tables = store.conn.table_names().execute().await?;
+    let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!("store has no '{VARIANTS_TABLE}' table"));
     }
@@ -57,7 +57,7 @@ pub async fn run(store_path: &str, sample: &str, f: &Filters) -> Result<()> {
     }
 
     // 1. Build ClinVar lookup with the requested filter.
-    let clinvar = store.conn.open_table(CLINVAR_TABLE).execute().await?;
+    let clinvar = store.variants.open_table(CLINVAR_TABLE).execute().await?;
     let cv_pred = build_clinvar_predicate(f);
     let mut cv_q = clinvar.query();
     if let Some(p) = cv_pred.as_deref() {
@@ -74,7 +74,7 @@ pub async fn run(store_path: &str, sample: &str, f: &Filters) -> Result<()> {
     }
 
     // 2. Pull the sample's variants.
-    let variants = store.conn.open_table(VARIANTS_TABLE).execute().await?;
+    let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
     let mut pred = format!("sample_name = '{}'", sql_escape(sample));
     if let Some(q) = f.min_qual {
         pred.push_str(&format!(" AND quality >= {}", q));

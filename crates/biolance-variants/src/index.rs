@@ -20,18 +20,19 @@ use lancedb::index::{
     Index,
 };
 
-use crate::schema::{CLINVAR_TABLE, SAMPLES_TABLE, VARIANTS_TABLE};
-use crate::store::Store;
+use biolance_core::schema::{CLINVAR_TABLE, SAMPLES_TABLE, VARIANTS_TABLE};
+use biolance_core::store::Store;
 
 /// Build all recommended indices. Safe to run repeatedly: Lance's
 /// `create_index` replaces any existing index on the same column(s).
 pub async fn run(store_path: &str) -> Result<()> {
     let store = Store::open(store_path).await?;
-    let tables = store.conn.table_names().execute().await?;
+    let var_tables = store.variants.table_names().execute().await?;
+    let root_tables = store.conn.table_names().execute().await?;
 
-    if tables.iter().any(|n| n == VARIANTS_TABLE) {
+    if var_tables.iter().any(|n| n == VARIANTS_TABLE) {
         let t = store
-            .conn
+            .variants
             .open_table(VARIANTS_TABLE)
             .execute()
             .await
@@ -55,9 +56,9 @@ pub async fn run(store_path: &str) -> Result<()> {
         eprintln!("[index] no {VARIANTS_TABLE} table; skipping");
     }
 
-    if tables.iter().any(|n| n == CLINVAR_TABLE) {
+    if var_tables.iter().any(|n| n == CLINVAR_TABLE) {
         let t = store
-            .conn
+            .variants
             .open_table(CLINVAR_TABLE)
             .execute()
             .await
@@ -88,7 +89,7 @@ pub async fn run(store_path: &str) -> Result<()> {
         eprintln!("[index] no {CLINVAR_TABLE} table; skipping");
     }
 
-    if tables.iter().any(|n| n == SAMPLES_TABLE) {
+    if root_tables.iter().any(|n| n == SAMPLES_TABLE) {
         let t = store.conn.open_table(SAMPLES_TABLE).execute().await?;
         eprintln!("[index] {SAMPLES_TABLE}: building Bitmap(sample_name)");
         t.create_index(
@@ -100,8 +101,12 @@ pub async fn run(store_path: &str) -> Result<()> {
     }
 
     // Enumerate what ended up on disk so the user sees the final state.
-    for name in &tables {
-        let t = store.conn.open_table(name).execute().await?;
+    for name in var_tables.iter().chain(root_tables.iter()) {
+        let t = if var_tables.contains(name) {
+            store.variants.open_table(name).execute().await?
+        } else {
+            store.conn.open_table(name).execute().await?
+        };
         let indices = t.list_indices().await?;
         if indices.is_empty() {
             eprintln!("[index] {name}: no indices");

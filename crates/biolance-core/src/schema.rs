@@ -69,11 +69,14 @@ pub fn samples_schema() -> Arc<Schema> {
     ]))
 }
 
-/// Name of the variants table inside a BioLance store.
-pub const VARIANTS_TABLE: &str = "variants";
+/// Name of the variant calls table (in the variants-layer connection).
+/// On disk: `<store>/variants/calls.lance/`
+pub const VARIANTS_TABLE: &str = "calls";
 
-/// Name of the ClinVar annotations table inside a BioLance store.
+/// Name of the ClinVar annotations table (in the variants-layer connection).
+/// On disk: `<store>/variants/clinvar.lance/`
 pub const CLINVAR_TABLE: &str = "clinvar";
 
-/// Name of the sample registry table inside a BioLance store.
+/// Name of the sample registry table (in the root connection).
+/// On disk: `<store>/samples.lance/`
 pub const SAMPLES_TABLE: &str = "samples";

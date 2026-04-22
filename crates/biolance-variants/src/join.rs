@@ -5,9 +5,9 @@ use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UI
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use crate::gene_lists::{gene_in_set, ACMG_SF_V3};
-use crate::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
-use crate::store::Store;
+use biolance_core::gene_lists::{gene_in_set, ACMG_SF_V3};
+use biolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
+use biolance_core::store::Store;
 
 type Key = (String, u64, String, String);
 
@@ -36,7 +36,7 @@ pub async fn run(
     let store = Store::open(store_path).await?;
 
     // Make sure the ClinVar table exists — ingest it on demand if missing.
-    let tables = store.conn.table_names().execute().await?;
+    let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == CLINVAR_TABLE) {
         println!("[join] '{CLINVAR_TABLE}' table not found; ingesting {annotation_vcf} …");
         crate::ingest::run(
@@ -60,8 +60,8 @@ pub async fn run(
         ));
     }
 
-    let variants = store.conn.open_table(VARIANTS_TABLE).execute().await?;
-    let clinvar = store.conn.open_table(CLINVAR_TABLE).execute().await?;
+    let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
+    let clinvar = store.variants.open_table(CLINVAR_TABLE).execute().await?;
 
     // ClinVar predicate: significance-exact OR substring, default substring "pathogenic"
     // only applies when no filter is given at all.

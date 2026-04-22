@@ -469,14 +469,39 @@ dependencies = [
 ]
 
 [[package]]
-name = "biolance"
+name = "biolance-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "biolance-core",
+ "biolance-variants",
+ "clap",
+ "tokio",
+]
+
+[[package]]
+name = "biolance-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
  "chrono",
- "clap",
+ "futures",
+ "lancedb",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "biolance-variants"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "arrow-schema",
+ "biolance-core",
+ "chrono",
  "futures",
  "indicatif",
  "lancedb",

@@ -5,8 +5,8 @@ use arrow_array::{Array, RecordBatch, StringArray, UInt64Array};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use crate::schema::VARIANTS_TABLE;
-use crate::store::Store;
+use biolance_core::schema::VARIANTS_TABLE;
+use biolance_core::store::Store;
 
 type Key = (String, u64, String, String);
 
@@ -17,13 +17,13 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
     }
 
     let store = Store::open(store_path).await?;
-    let tables = store.conn.table_names().execute().await?;
+    let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!(
             "store has no '{VARIANTS_TABLE}' table; ingest samples first"
         ));
     }
-    let table = store.conn.open_table(VARIANTS_TABLE).execute().await?;
+    let table = store.variants.open_table(VARIANTS_TABLE).execute().await?;
 
     // Pull only the relevant samples using an IN-list.
     let in_list = samples

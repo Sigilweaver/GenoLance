@@ -23,10 +23,10 @@ use noodles::vcf::{
 };
 use tokio::sync::mpsc;
 
-use crate::schema::{
+use biolance_core::schema::{
     clinvar_schema, samples_schema, variant_schema, CLINVAR_TABLE, SAMPLES_TABLE, VARIANTS_TABLE,
 };
-use crate::store::Store;
+use biolance_core::store::Store;
 
 /// Number of rows to buffer before flushing a batch to the Lance table.
 const BATCH_SIZE: usize = 10_000;
@@ -61,7 +61,7 @@ async fn ingest_one(store: &Store, path: &str, sample_override: Option<&str>) ->
     let has_samples = !header.sample_names().is_empty();
 
     if looks_like_clinvar || !has_samples {
-        ingest_clinvar(&store.conn, &mut reader, &header).await
+        ingest_clinvar(&store.variants, &mut reader, &header).await
     } else {
         let sample_name = sample_override
             .map(str::to_owned)
@@ -75,7 +75,7 @@ async fn ingest_one(store: &Store, path: &str, sample_override: Option<&str>) ->
             .ok_or_else(|| anyhow!("could not determine sample name for {path}"))?;
 
         register_sample(&store.conn, &sample_name, path, &header).await?;
-        ingest_variants(&store.conn, &mut reader, &header, &sample_name).await
+        ingest_variants(&store.variants, &mut reader, &header, &sample_name).await
     }
 }
 

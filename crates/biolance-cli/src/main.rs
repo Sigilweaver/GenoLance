@@ -287,7 +287,7 @@ async fn main() -> Result<()> {
             files,
             sample,
         } => {
-            biolance::ingest::run(&store, &files, sample.as_deref()).await?;
+            biolance_variants::ingest::run(&store, &files, sample.as_deref()).await?;
         }
         Commands::Query {
             store,
@@ -297,7 +297,7 @@ async fn main() -> Result<()> {
             end,
             output,
         } => {
-            biolance::query::run(
+            biolance_variants::query::run(
                 &store,
                 gene.as_deref(),
                 chrom.as_deref(),
@@ -317,19 +317,19 @@ async fn main() -> Result<()> {
             acmg,
             gene_filter,
         } => {
-            let f = biolance::join::Filters {
+            let f = biolance_variants::join::Filters {
                 significance_substring: significance,
                 significance_exact: significance_exact
                     .as_deref()
-                    .map(biolance::gene_lists::parse_significance_list),
+                    .map(biolance_core::gene_lists::parse_significance_list),
                 min_qual,
                 min_dp,
                 acmg_only: acmg,
                 gene_filter: gene_filter
                     .as_deref()
-                    .map(biolance::gene_lists::parse_gene_list),
+                    .map(biolance_core::gene_lists::parse_gene_list),
             };
-            biolance::join::run(&store, &against, &f).await?;
+            biolance_variants::join::run(&store, &against, &f).await?;
         }
         Commands::Screen {
             store,
@@ -341,19 +341,19 @@ async fn main() -> Result<()> {
             acmg,
             gene_filter,
         } => {
-            let f = biolance::screen::Filters {
+            let f = biolance_variants::screen::Filters {
                 significance_substring: significance,
                 significance_exact: significance_exact
                     .as_deref()
-                    .map(biolance::gene_lists::parse_significance_list),
+                    .map(biolance_core::gene_lists::parse_significance_list),
                 min_qual,
                 min_dp,
                 acmg_only: acmg,
                 gene_filter: gene_filter
                     .as_deref()
-                    .map(biolance::gene_lists::parse_gene_list),
+                    .map(biolance_core::gene_lists::parse_gene_list),
             };
-            biolance::screen::run(&store, &samples, &f).await?;
+            biolance_variants::screen::run(&store, &samples, &f).await?;
         }
         Commands::CompoundHet {
             store,
@@ -365,19 +365,19 @@ async fn main() -> Result<()> {
             acmg,
             gene_filter,
         } => {
-            let f = biolance::compound::Filters {
+            let f = biolance_variants::compound::Filters {
                 significance_substring: significance,
                 significance_exact: significance_exact
                     .as_deref()
-                    .map(biolance::gene_lists::parse_significance_list),
+                    .map(biolance_core::gene_lists::parse_significance_list),
                 min_qual,
                 min_dp,
                 acmg_only: acmg,
                 gene_filter: gene_filter
                     .as_deref()
-                    .map(biolance::gene_lists::parse_gene_list),
+                    .map(biolance_core::gene_lists::parse_gene_list),
             };
-            biolance::compound::run(&store, &sample, &f).await?;
+            biolance_variants::compound::run(&store, &sample, &f).await?;
         }
         Commands::Export {
             store,
@@ -389,7 +389,7 @@ async fn main() -> Result<()> {
             merge,
         } => {
             if merge || sample.len() > 1 {
-                biolance::export::run_merge(
+                biolance_variants::export::run_merge(
                     &store,
                     &sample,
                     chrom.as_deref(),
@@ -403,7 +403,7 @@ async fn main() -> Result<()> {
                     .into_iter()
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("--sample is required"))?;
-                biolance::export::run(&store, &s, chrom.as_deref(), start, end, output.as_deref())
+                biolance_variants::export::run(&store, &s, chrom.as_deref(), start, end, output.as_deref())
                     .await?;
             }
         }
@@ -416,7 +416,7 @@ async fn main() -> Result<()> {
             start,
             end,
         } => {
-            biolance::annotate::run(&store, &sample, &vcf, &info, chrom.as_deref(), start, end)
+            biolance_variants::annotate::run(&store, &sample, &vcf, &info, chrom.as_deref(), start, end)
                 .await?;
         }
         Commands::Pgx {
@@ -424,17 +424,17 @@ async fn main() -> Result<()> {
             sample,
             genes,
         } => {
-            biolance::pgx::run(&store, &sample, &genes).await?;
+            biolance_variants::pgx::run(&store, &sample, &genes).await?;
         }
         Commands::Index { store } => {
-            biolance::index::run(&store).await?;
+            biolance_variants::index::run(&store).await?;
         }
         Commands::Compare {
             store,
             samples,
             mode,
         } => {
-            biolance::compare::run(&store, &samples, &mode).await?;
+            biolance_variants::compare::run(&store, &samples, &mode).await?;
         }
     }
 

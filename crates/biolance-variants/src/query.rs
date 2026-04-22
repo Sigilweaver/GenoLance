@@ -3,8 +3,8 @@ use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UI
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
-use crate::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
-use crate::store::Store;
+use biolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
+use biolance_core::store::Store;
 
 /// Query variants from a BioLance store.
 ///
@@ -21,13 +21,13 @@ pub async fn run(
 ) -> Result<()> {
     let store = Store::open(store_path).await?;
 
-    let table_names = store.conn.table_names().execute().await?;
+    let table_names = store.variants.table_names().execute().await?;
     if !table_names.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!(
             "store {store_path} has no '{VARIANTS_TABLE}' table — did you run `biolance ingest` first?"
         ));
     }
-    let variants = store.conn.open_table(VARIANTS_TABLE).execute().await?;
+    let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
 
     let mut predicates: Vec<String> = Vec::new();
 
@@ -49,7 +49,7 @@ pub async fn run(
                 "--gene requires a '{CLINVAR_TABLE}' table; ingest clinvar.vcf.gz first"
             ));
         }
-        let cv = store.conn.open_table(CLINVAR_TABLE).execute().await?;
+        let cv = store.variants.open_table(CLINVAR_TABLE).execute().await?;
         let stream = cv
             .query()
             .only_if(format!("gene_symbol = '{}'", sql_escape(g)))

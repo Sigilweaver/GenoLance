@@ -20,8 +20,8 @@ use arrow_array::{Array, RecordBatch, StringArray, UInt64Array};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use crate::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
-use crate::store::Store;
+use biolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
+use biolance_core::store::Store;
 
 /// Genes with the strongest CPIC Tier 1 / Tier 2 guidance. Extend via
 /// `--genes` on the CLI if you want to include others.
@@ -45,7 +45,7 @@ pub async fn run(
     extra_genes: &[String],
 ) -> Result<()> {
     let store = Store::open(store_path).await?;
-    let tables = store.conn.table_names().execute().await?;
+    let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!("store has no '{VARIANTS_TABLE}' table"));
     }
@@ -63,7 +63,7 @@ pub async fn run(
     }
 
     // 1. Pull ClinVar entries for PGx genes, filtered to drug-response rows.
-    let clinvar = store.conn.open_table(CLINVAR_TABLE).execute().await?;
+    let clinvar = store.variants.open_table(CLINVAR_TABLE).execute().await?;
     let gene_in = genes
         .iter()
         .map(|g| format!("'{}'", sql_escape(g)))
@@ -100,7 +100,7 @@ pub async fn run(
     }
 
     // 2. Pull the sample's variants and intersect by (chrom, pos, ref, alt).
-    let variants = store.conn.open_table(VARIANTS_TABLE).execute().await?;
+    let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
     let v_batches: Vec<RecordBatch> = variants
         .query()
         .only_if(format!("sample_name = '{}'", sql_escape(sample)))

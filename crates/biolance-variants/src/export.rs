@@ -14,8 +14,8 @@ use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UI
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use crate::schema::{SAMPLES_TABLE, VARIANTS_TABLE};
-use crate::store::Store;
+use biolance_core::schema::{SAMPLES_TABLE, VARIANTS_TABLE};
+use biolance_core::store::Store;
 
 /// Run `biolance export`.
 ///
@@ -31,22 +31,23 @@ pub async fn run(
 ) -> Result<()> {
     let store = Store::open(store_path).await?;
 
-    let tables = store.conn.table_names().execute().await?;
-    if !tables.iter().any(|n| n == VARIANTS_TABLE) {
+    let var_tables = store.variants.table_names().execute().await?;
+    if !var_tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!(
             "store has no '{VARIANTS_TABLE}' table; ingest a sample VCF first"
         ));
     }
 
     // 1. Header
-    let header_text = if tables.iter().any(|n| n == SAMPLES_TABLE) {
+    let root_tables = store.conn.table_names().execute().await?;
+    let header_text = if root_tables.iter().any(|n| n == SAMPLES_TABLE) {
         load_sample_header(&store, sample_name).await?
     } else {
         None
     };
 
     // 2. Variants for this sample, with optional region filter.
-    let variants = store.conn.open_table(VARIANTS_TABLE).execute().await?;
+    let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
     let mut preds: Vec<String> = Vec::new();
     preds.push(format!("sample_name = '{}'", sql_escape(sample_name)));
     if let Some(c) = chrom {
@@ -461,11 +462,11 @@ pub async fn run_merge(
         ));
     }
     let store = Store::open(store_path).await?;
-    let tables = store.conn.table_names().execute().await?;
-    if !tables.iter().any(|n| n == VARIANTS_TABLE) {
+    let var_tables = store.variants.table_names().execute().await?;
+    if !var_tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!("store has no '{VARIANTS_TABLE}' table"));
     }
-    let variants = store.conn.open_table(VARIANTS_TABLE).execute().await?;
+    let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
 
     // Per-sample row collections, indexed by sample position in sample_names.
     // Key: (chrom, pos, ref) -> Vec<Row>  (one Row per alt for that sample).
@@ -535,9 +536,9 @@ pub async fn run_merge(
 /// `##contig`, `##FORMAT`, `##INFO` lines) and swap the `#CHROM` line
 /// for our multi-sample variant.
 async fn write_merge_header<W: Write>(w: &mut W, store: &Store, samples: &[String]) -> Result<()> {
-    let tables = store.conn.table_names().execute().await?;
+    let root_tables = store.conn.table_names().execute().await?;
     let mut wrote_meta = false;
-    if tables.iter().any(|n| n == SAMPLES_TABLE) {
+    if root_tables.iter().any(|n| n == SAMPLES_TABLE) {
         if let Some(header) = load_sample_header(store, &samples[0]).await? {
             // Strip the stored header's trailing #CHROM line; we write our own.
             for line in header.lines() {

@@ -15,9 +15,9 @@ use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UI
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use crate::gene_lists::{gene_in_set, ACMG_SF_V3};
-use crate::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
-use crate::store::Store;
+use biolance_core::gene_lists::{gene_in_set, ACMG_SF_V3};
+use biolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
+use biolance_core::store::Store;
 
 type Key = (String, u64, String, String); // chrom-normalized, pos, ref, alt
 
@@ -43,7 +43,7 @@ pub async fn run(store_path: &str, samples: &[String], f: &Filters) -> Result<()
     }
 
     let store = Store::open(store_path).await?;
-    let tables = store.conn.table_names().execute().await?;
+    let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!(
             "store has no '{VARIANTS_TABLE}' table; ingest sample VCFs first"
@@ -56,7 +56,7 @@ pub async fn run(store_path: &str, samples: &[String], f: &Filters) -> Result<()
     }
 
     // 1. Pull filtered ClinVar into an in-memory map keyed on (chrom, pos, ref, alt).
-    let clinvar = store.conn.open_table(CLINVAR_TABLE).execute().await?;
+    let clinvar = store.variants.open_table(CLINVAR_TABLE).execute().await?;
     let cv_pred = build_clinvar_predicate(f);
     let cv_batches: Vec<RecordBatch> = clinvar
         .query()
@@ -88,7 +88,7 @@ pub async fn run(store_path: &str, samples: &[String], f: &Filters) -> Result<()
     if let Some(d) = f.min_dp {
         pred.push_str(&format!(" AND read_depth >= {}", d));
     }
-    let variants = store.conn.open_table(VARIANTS_TABLE).execute().await?;
+    let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
     let v_batches: Vec<RecordBatch> = variants
         .query()
         .only_if(pred)

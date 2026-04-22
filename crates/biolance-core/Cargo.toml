@@ -1,0 +1,16 @@
+[package]
+name = "biolance-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core store, schema, and gene-list types for BioLance"
+license = "MIT"
+
+[dependencies]
+lancedb      = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+futures      = { workspace = true }
+tokio        = { workspace = true }
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+chrono       = { workspace = true }
