@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "biolance",
+    name = "genolance",
     about = "A fast, columnar multi-sample variant store powered by Lance",
     version
 )]
@@ -14,9 +14,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Ingest one or more VCF/BCF files into a BioLance store
+    /// Ingest one or more VCF/BCF files into a GenoLance store
     Ingest {
-        /// Path to the BioLance store (created if it doesn't exist)
+        /// Path to the GenoLance store (created if it doesn't exist)
         #[arg(short, long)]
         store: String,
 
@@ -29,9 +29,9 @@ enum Commands {
         sample: Option<String>,
     },
 
-    /// Query variants from a BioLance store
+    /// Query variants from a GenoLance store
     Query {
-        /// Path to the BioLance store
+        /// Path to the GenoLance store
         #[arg(short, long)]
         store: String,
 
@@ -58,7 +58,7 @@ enum Commands {
 
     /// Annotate variants by joining against a reference VCF (e.g. ClinVar)
     Join {
-        /// Path to the BioLance store
+        /// Path to the GenoLance store
         #[arg(short, long)]
         store: String,
 
@@ -99,7 +99,7 @@ enum Commands {
     /// AND the site matches a ClinVar clinical_significance substring
     /// (default "pathogenic", case-insensitive).
     Screen {
-        /// Path to the BioLance store
+        /// Path to the GenoLance store
         #[arg(short, long)]
         store: String,
 
@@ -137,7 +137,7 @@ enum Commands {
     /// variants (possible compound het — phase unknown with short-read WGS)
     /// or at least one homozygous P/LP variant.
     CompoundHet {
-        /// Path to the BioLance store
+        /// Path to the GenoLance store
         #[arg(short, long)]
         store: String,
 
@@ -175,7 +175,7 @@ enum Commands {
     /// any annotation VCF (gnomAD, COSMIC, dbSNP, …) and emit selected INFO
     /// fields as output columns.
     Annotate {
-        /// Path to the BioLance store
+        /// Path to the GenoLance store
         #[arg(short, long)]
         store: String,
 
@@ -206,7 +206,7 @@ enum Commands {
     /// ClinVar drug-response annotations in known PGx genes. Screening
     /// only — not a diplotype call.
     Pgx {
-        /// Path to the BioLance store
+        /// Path to the GenoLance store
         #[arg(short, long)]
         store: String,
 
@@ -222,7 +222,7 @@ enum Commands {
     /// Export variants for a sample back to VCF (reconstructs original header).
     /// Pass `--merge` with multiple `--sample` values to emit a multi-sample VCF.
     Export {
-        /// Path to the BioLance store
+        /// Path to the GenoLance store
         #[arg(short, long)]
         store: String,
 
@@ -256,14 +256,14 @@ enum Commands {
     /// region / sample / gene lookups stop full-scanning. Safe to re-run;
     /// rebuilds any existing indices on the same columns.
     Index {
-        /// Path to the BioLance store
+        /// Path to the GenoLance store
         #[arg(short, long)]
         store: String,
     },
 
     /// Compare variants across two or more samples
     Compare {
-        /// Path to the BioLance store
+        /// Path to the GenoLance store
         #[arg(short, long)]
         store: String,
 
@@ -287,7 +287,7 @@ async fn main() -> Result<()> {
             files,
             sample,
         } => {
-            biolance_variants::ingest::run(&store, &files, sample.as_deref()).await?;
+            genolance_variants::ingest::run(&store, &files, sample.as_deref()).await?;
         }
         Commands::Query {
             store,
@@ -297,7 +297,7 @@ async fn main() -> Result<()> {
             end,
             output,
         } => {
-            biolance_variants::query::run(
+            genolance_variants::query::run(
                 &store,
                 gene.as_deref(),
                 chrom.as_deref(),
@@ -317,19 +317,19 @@ async fn main() -> Result<()> {
             acmg,
             gene_filter,
         } => {
-            let f = biolance_variants::join::Filters {
+            let f = genolance_variants::join::Filters {
                 significance_substring: significance,
                 significance_exact: significance_exact
                     .as_deref()
-                    .map(biolance_core::gene_lists::parse_significance_list),
+                    .map(genolance_core::gene_lists::parse_significance_list),
                 min_qual,
                 min_dp,
                 acmg_only: acmg,
                 gene_filter: gene_filter
                     .as_deref()
-                    .map(biolance_core::gene_lists::parse_gene_list),
+                    .map(genolance_core::gene_lists::parse_gene_list),
             };
-            biolance_variants::join::run(&store, &against, &f).await?;
+            genolance_variants::join::run(&store, &against, &f).await?;
         }
         Commands::Screen {
             store,
@@ -341,19 +341,19 @@ async fn main() -> Result<()> {
             acmg,
             gene_filter,
         } => {
-            let f = biolance_variants::screen::Filters {
+            let f = genolance_variants::screen::Filters {
                 significance_substring: significance,
                 significance_exact: significance_exact
                     .as_deref()
-                    .map(biolance_core::gene_lists::parse_significance_list),
+                    .map(genolance_core::gene_lists::parse_significance_list),
                 min_qual,
                 min_dp,
                 acmg_only: acmg,
                 gene_filter: gene_filter
                     .as_deref()
-                    .map(biolance_core::gene_lists::parse_gene_list),
+                    .map(genolance_core::gene_lists::parse_gene_list),
             };
-            biolance_variants::screen::run(&store, &samples, &f).await?;
+            genolance_variants::screen::run(&store, &samples, &f).await?;
         }
         Commands::CompoundHet {
             store,
@@ -365,19 +365,19 @@ async fn main() -> Result<()> {
             acmg,
             gene_filter,
         } => {
-            let f = biolance_variants::compound::Filters {
+            let f = genolance_variants::compound::Filters {
                 significance_substring: significance,
                 significance_exact: significance_exact
                     .as_deref()
-                    .map(biolance_core::gene_lists::parse_significance_list),
+                    .map(genolance_core::gene_lists::parse_significance_list),
                 min_qual,
                 min_dp,
                 acmg_only: acmg,
                 gene_filter: gene_filter
                     .as_deref()
-                    .map(biolance_core::gene_lists::parse_gene_list),
+                    .map(genolance_core::gene_lists::parse_gene_list),
             };
-            biolance_variants::compound::run(&store, &sample, &f).await?;
+            genolance_variants::compound::run(&store, &sample, &f).await?;
         }
         Commands::Export {
             store,
@@ -389,7 +389,7 @@ async fn main() -> Result<()> {
             merge,
         } => {
             if merge || sample.len() > 1 {
-                biolance_variants::export::run_merge(
+                genolance_variants::export::run_merge(
                     &store,
                     &sample,
                     chrom.as_deref(),
@@ -403,7 +403,7 @@ async fn main() -> Result<()> {
                     .into_iter()
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("--sample is required"))?;
-                biolance_variants::export::run(
+                genolance_variants::export::run(
                     &store,
                     &s,
                     chrom.as_deref(),
@@ -423,7 +423,7 @@ async fn main() -> Result<()> {
             start,
             end,
         } => {
-            biolance_variants::annotate::run(
+            genolance_variants::annotate::run(
                 &store,
                 &sample,
                 &vcf,
@@ -439,17 +439,17 @@ async fn main() -> Result<()> {
             sample,
             genes,
         } => {
-            biolance_variants::pgx::run(&store, &sample, &genes).await?;
+            genolance_variants::pgx::run(&store, &sample, &genes).await?;
         }
         Commands::Index { store } => {
-            biolance_variants::index::run(&store).await?;
+            genolance_variants::index::run(&store).await?;
         }
         Commands::Compare {
             store,
             samples,
             mode,
         } => {
-            biolance_variants::compare::run(&store, &samples, &mode).await?;
+            genolance_variants::compare::run(&store, &samples, &mode).await?;
         }
     }
 

@@ -5,9 +5,9 @@ use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UI
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use biolance_core::gene_lists::{gene_in_set, ACMG_SF_V3};
-use biolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
-use biolance_core::store::Store;
+use genolance_core::gene_lists::{gene_in_set, ACMG_SF_V3};
+use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
+use genolance_core::store::Store;
 
 type Key = (String, u64, String, String);
 

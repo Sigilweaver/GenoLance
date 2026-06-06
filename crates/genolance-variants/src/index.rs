@@ -1,4 +1,4 @@
-//! Build scalar indices on a BioLance store so region / sample / gene
+//! Build scalar indices on a GenoLance store so region / sample / gene
 //! lookups stop doing full table scans.
 //!
 //! Lance supports two scalar index flavors we care about:
@@ -9,7 +9,7 @@
 //!   columns (dozens to low hundreds of distinct values). Used here for
 //!   `chrom`, `sample_name`, `gene_symbol`, `clinical_significance`.
 //!
-//! All BioLance query paths issue SQL-like predicates against these
+//! All GenoLance query paths issue SQL-like predicates against these
 //! columns (`chrom = 'chr17' AND pos >= … AND pos <= …`,
 //! `sample_name = 'Nathan'`, `gene_symbol IN (…)`), so indexing them
 //! gives every existing subcommand a speedup with no caller changes.
@@ -20,8 +20,8 @@ use lancedb::index::{
     Index,
 };
 
-use biolance_core::schema::{CLINVAR_TABLE, SAMPLES_TABLE, VARIANTS_TABLE};
-use biolance_core::store::Store;
+use genolance_core::schema::{CLINVAR_TABLE, SAMPLES_TABLE, VARIANTS_TABLE};
+use genolance_core::store::Store;
 
 /// Build all recommended indices. Safe to run repeatedly: Lance's
 /// `create_index` replaces any existing index on the same column(s).

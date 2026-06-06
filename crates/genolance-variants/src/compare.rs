@@ -5,8 +5,8 @@ use arrow_array::{Array, RecordBatch, StringArray, UInt64Array};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use biolance_core::schema::VARIANTS_TABLE;
-use biolance_core::store::Store;
+use genolance_core::schema::VARIANTS_TABLE;
+use genolance_core::store::Store;
 
 type Key = (String, u64, String, String);
 

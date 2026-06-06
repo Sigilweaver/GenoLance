@@ -29,7 +29,7 @@ pub fn variant_schema() -> Arc<Schema> {
         Field::new("format_pl", DataType::Utf8, true),    // phred likelihoods, e.g. "0,30,255"
         Field::new("allele_freq", DataType::Float32, true), // per-alt AF
         // Non-standard FORMAT fields we don't have dedicated columns for,
-        // serialized as "KEY=VAL;KEY=VAL". Preserved so `biolance export`
+        // serialized as "KEY=VAL;KEY=VAL". Preserved so `genolance export`
         // can re-emit them after the standard GT:AD:DP:GQ:PL block.
         Field::new("format_extra", DataType::Utf8, true),
         // Original FORMAT key order as ":" joined string (e.g. "GT:GQ:DP:AD:VAF:PL").
@@ -58,7 +58,7 @@ pub fn clinvar_schema() -> Arc<Schema> {
 
 /// Arrow schema for the `samples` registry table. One row per ingested
 /// sample keyed by `sample_name`. Holds the raw VCF header text so
-/// `biolance export` can reconstruct a valid header on the way out.
+/// `genolance export` can reconstruct a valid header on the way out.
 pub fn samples_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("sample_name", DataType::Utf8, false),

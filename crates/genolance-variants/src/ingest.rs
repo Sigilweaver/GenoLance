@@ -23,15 +23,15 @@ use noodles::vcf::{
 };
 use tokio::sync::mpsc;
 
-use biolance_core::schema::{
+use genolance_core::schema::{
     clinvar_schema, samples_schema, variant_schema, CLINVAR_TABLE, SAMPLES_TABLE, VARIANTS_TABLE,
 };
-use biolance_core::store::Store;
+use genolance_core::store::Store;
 
 /// Number of rows to buffer before flushing a batch to the Lance table.
 const BATCH_SIZE: usize = 10_000;
 
-/// Ingest one or more VCF/BCF files into the BioLance store at `store_path`.
+/// Ingest one or more VCF/BCF files into the GenoLance store at `store_path`.
 ///
 /// Files whose filename contains "clinvar" or that have no sample columns
 /// are ingested into the `clinvar` annotation table. All others are ingested
@@ -116,7 +116,7 @@ async fn open_or_create(conn: &Connection, name: &str, schema: SchemaRef) -> Res
 // ---------------------------------------------------------------------------
 
 /// Serialize the parsed header back to VCF text via the noodles writer so
-/// `biolance export` can reproduce it byte-for-byte modulo ordering.
+/// `genolance export` can reproduce it byte-for-byte modulo ordering.
 fn serialize_header(header: &vcf::Header) -> Result<String> {
     let mut buf: Vec<u8> = Vec::new();
     {
@@ -460,7 +460,7 @@ fn extract_sample_format_fields(
     };
 
     // Collect everything else into a compact "KEY=VAL;KEY=VAL" blob so
-    // `biolance export` can re-emit FORMAT fields we don't model directly
+    // `genolance export` can re-emit FORMAT fields we don't model directly
     // (VAF, MIN_DP, MED_DP, …). Known keys are skipped to avoid duplication.
     // Also capture the full key order (all keys, in record order) for faithful
     // FORMAT column reconstruction on export.

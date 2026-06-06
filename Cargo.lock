@@ -469,49 +469,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "biolance-cli"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "biolance-core",
- "biolance-variants",
- "clap",
- "tokio",
-]
-
-[[package]]
-name = "biolance-core"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "arrow-array",
- "arrow-schema",
- "chrono",
- "futures",
- "lancedb",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "biolance-variants"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "arrow-array",
- "arrow-schema",
- "biolance-core",
- "chrono",
- "futures",
- "indicatif",
- "lancedb",
- "noodles",
- "rayon",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "bit-vec"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1991,6 +1948,49 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
+]
+
+[[package]]
+name = "genolance-cli"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "genolance-core",
+ "genolance-variants",
+ "tokio",
+]
+
+[[package]]
+name = "genolance-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "arrow-schema",
+ "chrono",
+ "futures",
+ "lancedb",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "genolance-variants"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "arrow-schema",
+ "chrono",
+ "futures",
+ "genolance-core",
+ "indicatif",
+ "lancedb",
+ "noodles",
+ "rayon",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

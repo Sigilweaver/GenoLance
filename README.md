@@ -1,13 +1,13 @@
-# BioLance
+# GenoLance
 
-[![CI](https://github.com/Sigilweaver/BioLance/actions/workflows/ci.yml/badge.svg)](https://github.com/Sigilweaver/BioLance/actions/workflows/ci.yml)
+[![CI](https://github.com/Sigilweaver/GenoLance/actions/workflows/ci.yml/badge.svg)](https://github.com/Sigilweaver/GenoLance/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust MSRV](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
-[![Docs](https://img.shields.io/badge/docs-sigilweaver.app-blue.svg)](https://sigilweaver.app/biolance/docs/)
+[![Docs](https://img.shields.io/badge/docs-sigilweaver.app-blue.svg)](https://sigilweaver.app/genolance/docs/)
 
 A fast, columnar multi-sample variant store powered by [Lance].
 
-BioLance ingests sample VCFs (and annotation VCFs like ClinVar) into a
+GenoLance ingests sample VCFs (and annotation VCFs like ClinVar) into a
 LanceDB directory where every field is an Arrow column. Once ingested,
 variants can be queried, joined against ClinVar, and compared across
 samples entirely out of a single process — no Spark, no cloud, no
@@ -18,33 +18,33 @@ GenomicsDB.
 Validated against real DeepVariant WGS data (GRCh37, ~5.8M sites per
 sample). It currently supports:
 
-- `biolance ingest` — parse a VCF/BCF and write one Arrow row per
+- `genolance ingest` — parse a VCF/BCF and write one Arrow row per
   (sample, chrom, pos, ref, alt). Multi-allelic sites are split.
   ClinVar VCFs are auto-detected by filename and go into a separate
   `clinvar` table.
-- `biolance query` — region queries (`--chrom --start --end`) plus
+- `genolance query` — region queries (`--chrom --start --end`) plus
   gene lookups that resolve gene → positions via ClinVar before
   filtering the variants table.
-- `biolance join` — annotate variants against ClinVar with an
+- `genolance join` — annotate variants against ClinVar with an
   optional `--significance pathogenic`-style substring filter, an
   exact-match alternative (`--significance-exact`), quality gates
   (`--min-qual`, `--min-dp`), and gene-set restriction (`--acmg`,
   `--genes`). Chromosome naming mismatch (`chr1` vs `1`) is normalized
   automatically, so GRCh37 sample VCFs join correctly against the
   GRCh37 ClinVar build.
-- `biolance compare` — `concordance`, `carrier-screen`, and
+- `genolance compare` — `concordance`, `carrier-screen`, and
   `private` modes across two or more samples.
-- `biolance screen` — combined carrier-screen + ClinVar pathogenicity
+- `genolance screen` — combined carrier-screen + ClinVar pathogenicity
   filter: sites where *all* listed samples carry at least one ALT AND
   the site matches a ClinVar significance substring. The compound
   carrier-screening question in a single command. Supports exact
   significance matching (`--significance-exact`), quality gates
   (`--min-qual`, `--min-dp`), and gene-set restriction (`--acmg`,
   `--genes`).
-- `biolance compound-het` — single-sample screen that flags genes with
+- `genolance compound-het` — single-sample screen that flags genes with
   two or more heterozygous P/LP variants (possible compound het, phase
   unknown) or any homozygous P/LP variant. Same filter flags as `screen`.
-- `biolance export` — reconstruct a VCF for a given sample (with
+- `genolance export` — reconstruct a VCF for a given sample (with
   optional region filter). **Verified byte-exact roundtrip** (modulo
   float QUAL trailing-zero formatting) on DeepVariant VCFs:
   FORMAT key order, all field values, INFO, multi-allelic grouping all
@@ -57,7 +57,7 @@ sample). It currently supports:
 This project depends on `lance-encoding`, which needs `protoc`. The easiest way to get it is through the bundled [pixi] environment:
 
 ```sh
-cd BioLance
+cd GenoLance
 pixi install                    # installs bcftools, samtools, libprotobuf
 cargo build --release           # picks up .cargo/config.toml → $PROTOC
 ```
@@ -65,50 +65,50 @@ cargo build --release           # picks up .cargo/config.toml → $PROTOC
 ## Example
 
 ```sh
-STORE=/tmp/biolance-demo
+STORE=/tmp/genolance-demo
 rm -rf $STORE
 
 # Ingest two samples and a ClinVar build into one store.
 # Match the ClinVar assembly to your sample VCFs (GRCh37 vs GRCh38).
-biolance ingest -s $STORE --sample sampleA path/to/sampleA.vcf.gz
-biolance ingest -s $STORE --sample sampleB path/to/sampleB.vcf.gz
-biolance ingest -s $STORE path/to/clinvar.vcf.gz
+genolance ingest -s $STORE --sample sampleA path/to/sampleA.vcf.gz
+genolance ingest -s $STORE --sample sampleB path/to/sampleB.vcf.gz
+genolance ingest -s $STORE path/to/clinvar.vcf.gz
 
 # Region query
-biolance query -s $STORE --chrom chr17 --start 43044000 --end 43125000
+genolance query -s $STORE --chrom chr17 --start 43044000 --end 43125000
 
 # Gene query (uses ClinVar position index)
-biolance query -s $STORE --gene BRCA1
+genolance query -s $STORE --gene BRCA1
 
 # ClinVar join, only likely-/pathogenic calls the sample actually carries
-biolance join -s $STORE --significance pathogenic
+genolance join -s $STORE --significance pathogenic
 
 # Stricter: exact significance match + quality gates + ACMG SF v3 gene list
-biolance join -s $STORE \
+genolance join -s $STORE \
   --significance-exact "Pathogenic,Likely_pathogenic,Pathogenic/Likely_pathogenic" \
   --min-qual 20 --min-dp 10 --acmg
 
 # Compare samples
-biolance compare -s $STORE sampleA sampleB --mode concordance
-biolance compare -s $STORE sampleA sampleB --mode carrier-screen
+genolance compare -s $STORE sampleA sampleB --mode concordance
+genolance compare -s $STORE sampleA sampleB --mode carrier-screen
 
 # Compound screen: sites where ALL listed samples carry a pathogenic ClinVar variant
-biolance screen -s $STORE sampleA sampleB
-biolance screen -s $STORE sampleA sampleB --significance "likely_pathogenic"
+genolance screen -s $STORE sampleA sampleB
+genolance screen -s $STORE sampleA sampleB --significance "likely_pathogenic"
 # Clinical-grade variant: exact P/LP match, QUAL>=20, DP>=10, ACMG genes only
-biolance screen -s $STORE sampleA sampleB \
+genolance screen -s $STORE sampleA sampleB \
   --significance-exact "Pathogenic,Likely_pathogenic,Pathogenic/Likely_pathogenic" \
   --min-qual 20 --min-dp 10 --acmg
 
 # Compound-het / hom-alt screen for one sample: flags genes with 2+ het P/LP
 # variants (phase unknown) or any hom-alt P/LP variant. Useful for recessive disease.
-biolance compound-het -s $STORE --sample sampleA \
+genolance compound-het -s $STORE --sample sampleA \
   --significance-exact "Pathogenic,Likely_pathogenic,Pathogenic/Likely_pathogenic" \
   --min-qual 20 --min-dp 10
 
 # Export back to VCF — verified perfect roundtrip on DeepVariant VCFs
-biolance export -s $STORE --sample sampleA -o sampleA.roundtrip.vcf
-biolance export -s $STORE --sample sampleA --chrom chr17 --start 43044000 --end 43125000
+genolance export -s $STORE --sample sampleA -o sampleA.roundtrip.vcf
+genolance export -s $STORE --sample sampleA --chrom chr17 --start 43044000 --end 43125000
 ```
 
 ## Schema
@@ -143,7 +143,7 @@ The `clinvar` table adds `variation_id`, `gene_symbol`,
 
 The `samples` table (registry, one row per ingested sample) stores
 `sample_name`, `source_path`, `vcf_header` (raw text), `ingested_at`,
-and `reference`. It backs `biolance export`'s header reconstruction.
+and `reference`. It backs `genolance export`'s header reconstruction.
 
 ## Known limitations
 
@@ -157,13 +157,13 @@ and `reference`. It backs `biolance export`'s header reconstruction.
   so a store with `chr`-prefixed variants joins correctly against a
   ClinVar build that uses bare chromosome names (e.g. GRCh37). No
   rewriting on ingest.
-- **`biolance export` is verified-lossless on DeepVariant VCFs**:
+- **`genolance export` is verified-lossless on DeepVariant VCFs**:
   all 10,000-site stress tests produce zero diffs (after float
   QUAL normalization). FORMAT key order is stored per-row and reproduced
   exactly. The only intentional semantic difference: QUAL `52.10` is
   emitted as `52.1` (equivalent float, `bcftools`-transparent).
 - Scalar indices are **not** built automatically — run
-  `biolance index -s $STORE` once after ingest to create BTree
+  `genolance index -s $STORE` once after ingest to create BTree
   indices on `pos` and Bitmap indices on `chrom`, `sample_name`,
   `gene_symbol`, and `clinical_significance`. Safe to re-run after
   further ingests to refresh. Gene queries go from ~5s to sub-second

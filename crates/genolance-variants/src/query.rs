@@ -3,10 +3,10 @@ use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UI
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
-use biolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
-use biolance_core::store::Store;
+use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
+use genolance_core::store::Store;
 
-/// Query variants from a BioLance store.
+/// Query variants from a GenoLance store.
 ///
 /// If `gene` is provided the store must also contain a `clinvar` table —
 /// ClinVar positions for that gene are looked up and used as the region
@@ -24,7 +24,7 @@ pub async fn run(
     let table_names = store.variants.table_names().execute().await?;
     if !table_names.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!(
-            "store {store_path} has no '{VARIANTS_TABLE}' table — did you run `biolance ingest` first?"
+            "store {store_path} has no '{VARIANTS_TABLE}' table — did you run `genolance ingest` first?"
         ));
     }
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;

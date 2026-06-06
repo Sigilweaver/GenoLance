@@ -1,4 +1,4 @@
-//! `biolance annotate` — join a sample's variants against any annotation
+//! `genolance annotate` — join a sample's variants against any annotation
 //! VCF on-the-fly and emit configurable INFO fields as output columns.
 //!
 //! Unlike `join`, which reads the pre-ingested `clinvar` table, this
@@ -22,8 +22,8 @@ use noodles::vcf::{
     variant::record::{info::field::Value as InfoValue, AlternateBases},
 };
 
-use biolance_core::schema::VARIANTS_TABLE;
-use biolance_core::store::Store;
+use genolance_core::schema::VARIANTS_TABLE;
+use genolance_core::store::Store;
 
 type Key = (String, u64, String, String);
 

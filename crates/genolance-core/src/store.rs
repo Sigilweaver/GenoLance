@@ -1,7 +1,7 @@
 use anyhow::Result;
 use lancedb::Connection;
 
-/// A handle to an open BioLance store.
+/// A handle to an open GenoLance store.
 ///
 /// The on-disk layout uses one LanceDB connection per omics layer:
 ///
@@ -11,8 +11,8 @@ use lancedb::Connection;
 ///   variants/
 ///     calls.lance/        ← variants connection: called variant rows
 ///     clinvar.lance/      ← variants connection: ClinVar annotation rows
-///   rna/                  ← future: biolance-rna layer
-///   methyl/               ← future: biolance-methyl layer
+///   rna/                  ← future: genolance-rna layer
+///   methyl/               ← future: genolance-methyl layer
 /// ```
 pub struct Store {
     /// Root connection — holds the `samples` registry table.
@@ -22,7 +22,7 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open (or create) a BioLance store at `root`.
+    /// Open (or create) a GenoLance store at `root`.
     ///
     /// Creates `<root>/variants/` if it doesn't exist.
     pub async fn open(root: &str) -> Result<Self> {

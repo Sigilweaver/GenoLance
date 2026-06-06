@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the latest minor release of BioLance is supported with
+Only the latest minor release of GenoLance is supported with
 security fixes.
 
 | Version | Supported |
@@ -13,7 +13,7 @@ security fixes.
 ## Reporting a vulnerability
 
 Please report security vulnerabilities privately via
-[GitHub Security Advisories](https://github.com/Sigilweaver/BioLance/security/advisories/new).
+[GitHub Security Advisories](https://github.com/Sigilweaver/GenoLance/security/advisories/new).
 
 Do **not** open a public issue for security reports. We will
 acknowledge within 7 days and aim to publish a fix or mitigation
@@ -31,7 +31,7 @@ In scope:
 
 Out of scope:
 
-- Incorrect variant interpretation. BioLance is not validated for
+- Incorrect variant interpretation. GenoLance is not validated for
   clinical use; open a normal issue with a reproducer.
 - Vulnerabilities in upstream Lance / Arrow / htslib crates:
   please report those upstream.

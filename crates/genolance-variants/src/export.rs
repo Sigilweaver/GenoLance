@@ -14,13 +14,13 @@ use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UI
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use biolance_core::schema::{SAMPLES_TABLE, VARIANTS_TABLE};
-use biolance_core::store::Store;
+use genolance_core::schema::{SAMPLES_TABLE, VARIANTS_TABLE};
+use genolance_core::store::Store;
 
-/// Run `biolance export`.
+/// Run `genolance export`.
 ///
 /// Writes a VCF for `sample_name` to `output_path` (or stdout if `None`).
-/// Optional region filters mirror `biolance query`.
+/// Optional region filters mirror `genolance query`.
 pub async fn run(
     store_path: &str,
     sample_name: &str,
@@ -329,7 +329,7 @@ fn write_site<W: Write>(w: &mut W, site: &[Row], _sample_name: &str) -> Result<(
 fn write_minimal_header<W: Write>(w: &mut W, sample_name: &str) -> Result<()> {
     // Fallback when no header was recorded for this sample.
     writeln!(w, "##fileformat=VCFv4.2")?;
-    writeln!(w, "##source=biolance-export")?;
+    writeln!(w, "##source=genolance-export")?;
     writeln!(
         w,
         "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">"
@@ -544,13 +544,13 @@ async fn write_merge_header<W: Write>(w: &mut W, store: &Store, samples: &[Strin
                 }
                 writeln!(w, "{line}")?;
             }
-            writeln!(w, "##biolance_merge_samples={}", samples.join(","))?;
+            writeln!(w, "##genolance_merge_samples={}", samples.join(","))?;
             wrote_meta = true;
         }
     }
     if !wrote_meta {
         writeln!(w, "##fileformat=VCFv4.2")?;
-        writeln!(w, "##source=biolance-merge-export")?;
+        writeln!(w, "##source=genolance-merge-export")?;
         writeln!(
             w,
             "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">"

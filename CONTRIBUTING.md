@@ -1,10 +1,10 @@
-# Contributing to BioLance
+# Contributing to GenoLance
 
-Thanks for your interest in BioLance. This is a small, single-maintainer
+Thanks for your interest in GenoLance. This is a small, single-maintainer
 project that ships [Apache-2.0](LICENSE) Rust tooling for fast,
 columnar multi-sample variant analysis on top of [Lance].
 
-Crates in this repo: `biolance-core`, `biolance-variants`, `biolance-cli`.
+Crates in this repo: `genolance-core`, `genolance-variants`, `genolance-cli`.
 
 ## Before you open a PR
 
@@ -23,7 +23,7 @@ Crates in this repo: `biolance-core`, `biolance-variants`, `biolance-cli`.
 
 ## Working with VCFs and ClinVar
 
-BioLance is validated against real DeepVariant WGS data (GRCh37,
+GenoLance is validated against real DeepVariant WGS data (GRCh37,
 ~5.8M sites per sample) and several ClinVar builds. When changing
 ingest, query, or join semantics, please add a fixture-backed test
 that exercises the affected code path. Real-data smoke tests live
@@ -36,7 +36,7 @@ touch this, please test both directions.
 
 ## Roundtrip guarantee
 
-`biolance export` is verified byte-exact (modulo float QUAL
+`genolance export` is verified byte-exact (modulo float QUAL
 trailing-zero formatting) on DeepVariant VCFs. If you change anything
 that touches the export path or per-row `format_key_order` storage,
 the roundtrip test in `tests/` must continue to pass.

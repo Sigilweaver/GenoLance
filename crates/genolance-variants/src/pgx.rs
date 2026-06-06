@@ -1,4 +1,4 @@
-//! `biolance pgx` — pharmacogenomic screening.
+//! `genolance pgx` — pharmacogenomic screening.
 //!
 //! This is intentionally narrow. Real star-allele diplotype calling
 //! (CYP2D6 especially) needs phased haplotypes plus structural variant
@@ -8,7 +8,7 @@
 //! `disease_name` indicates a drug-response annotation, then report
 //! each carried variant with the drug/effect text.
 //!
-//! Think of it as `biolance join --significance "drug response"`
+//! Think of it as `genolance join --significance "drug response"`
 //! scoped to PGx-relevant genes. Useful for surfacing review-worthy
 //! variants for a clinician; *not* a diplotype call and *not*
 //! a prescribing recommendation.
@@ -20,8 +20,8 @@ use arrow_array::{Array, RecordBatch, StringArray, UInt64Array};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use biolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
-use biolance_core::store::Store;
+use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
+use genolance_core::store::Store;
 
 /// Genes with the strongest CPIC Tier 1 / Tier 2 guidance. Extend via
 /// `--genes` on the CLI if you want to include others.

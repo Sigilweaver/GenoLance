@@ -1,6 +1,6 @@
 [package]
-name = "biolance-cli"
-description = "Command-line interface for BioLance"
+name = "genolance-cli"
+description = "Command-line interface for GenoLance"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,12 +17,12 @@ categories.workspace = true
 workspace = true
 
 [[bin]]
-name = "biolance"
+name = "genolance"
 path = "src/main.rs"
 
 [dependencies]
-biolance-core     = { workspace = true }
-biolance-variants = { workspace = true }
+genolance-core     = { workspace = true }
+genolance-variants = { workspace = true }
 tokio             = { workspace = true }
 clap              = { workspace = true }
 anyhow            = { workspace = true }

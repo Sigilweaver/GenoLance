@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "crates/biolance-core",
-    "crates/biolance-variants",
-    "crates/biolance-cli",
+    "crates/genolance-core",
+    "crates/genolance-variants",
+    "crates/genolance-cli",
 ]
 resolver = "2"
 
@@ -12,9 +12,9 @@ edition = "2021"
 rust-version = "1.87"
 authors = ["Nathan Riley <git@nathanriley.com>"]
 license = "Apache-2.0"
-repository = "https://github.com/Sigilweaver/BioLance"
-homepage = "https://sigilweaver.app/biolance/"
-documentation = "https://sigilweaver.app/biolance/docs/"
+repository = "https://github.com/Sigilweaver/GenoLance"
+homepage = "https://sigilweaver.app/genolance/"
+documentation = "https://sigilweaver.app/genolance/docs/"
 readme = "README.md"
 keywords = ["variants", "vcf", "clinvar", "lance", "bioinformatics"]
 categories = ["science", "command-line-utilities", "database"]
@@ -36,8 +36,8 @@ anyhow       = "1"
 thiserror    = "2"
 indicatif    = "0"
 chrono       = { version = "0.4", default-features = false, features = ["clock"] }
-biolance-core     = { path = "crates/biolance-core",     version = "0.2.0" }
-biolance-variants = { path = "crates/biolance-variants", version = "0.2.0" }
+genolance-core     = { path = "crates/genolance-core",     version = "0.2.0" }
+genolance-variants = { path = "crates/genolance-variants", version = "0.2.0" }
 
 [profile.release]
 opt-level = 3

@@ -1,7 +1,7 @@
 [workspace]
-name = "biolance"
+name = "genolance"
 version = "0.1.0"
-description = "Bioinformatics CLI tools for the BioLance dev environment"
+description = "Bioinformatics CLI tools for the GenoLance dev environment"
 channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64"]
 

@@ -1,6 +1,6 @@
 [package]
-name = "biolance-core"
-description = "Core store, schema, and gene-list types for BioLance"
+name = "genolance-core"
+description = "Core store, schema, and gene-list types for GenoLance"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

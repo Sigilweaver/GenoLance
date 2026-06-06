@@ -11,13 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-05-22
 
-First publication-ready cut. Moves BioLance onto the same release and
+First publication-ready cut. Moves GenoLance onto the same release and
 metadata conventions as the rest of the Sigilweaver suite.
 
 ### Changed
 
 - Relicensed from MIT to **Apache-2.0** (no prior release was ever
-  published under MIT; this brings BioLance in line with the rest of
+  published under MIT; this brings GenoLance in line with the rest of
   the Sigilweaver suite, including the explicit patent grant the
   Apache-2.0 license adds for downstream users).
 - Moved crate metadata to `[workspace.package]` so `version`,
@@ -34,14 +34,14 @@ metadata conventions as the rest of the Sigilweaver suite.
 - `CHANGELOG.md` (this file).
 - README badges (CI, license, MSRV, docs).
 - GitHub Actions CI workflow: `cargo fmt`, `cargo clippy`, `cargo test`.
-- `homepage = "https://sigilweaver.app/biolance/"` and
-  `documentation = "https://sigilweaver.app/biolance/docs/"` for
+- `homepage = "https://sigilweaver.app/genolance/"` and
+  `documentation = "https://sigilweaver.app/genolance/docs/"` for
   crates.io and docs.rs discovery.
 
 ## [0.1.0] - 2025-XX-XX
 
-- Initial layered store layout: `biolance-core`, `biolance-variants`,
-  `biolance-cli`.
+- Initial layered store layout: `genolance-core`, `genolance-variants`,
+  `genolance-cli`.
 - CLI subcommands: `ingest`, `query`, `join`, `compare`, `screen`,
   `compound-het`, `export`.
 - Validated against DeepVariant WGS data (GRCh37, ~5.8M sites/sample).
