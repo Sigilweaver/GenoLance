@@ -1,4 +1,4 @@
-//! VCF export — reconstruct a VCF for a single sample (or region) from
+//! VCF export - reconstruct a VCF for a single sample (or region) from
 //! the Lance store. Per-alt split rows are grouped back into one VCF
 //! record per site using `alt_index` order; the stored `info_raw` and
 //! `gt_raw` fields make this lossless for fields we preserve.
@@ -71,7 +71,7 @@ pub async fn run(
     for b in &batches {
         collect_rows(b, &mut rows);
     }
-    // Stable sort by (chrom, pos, ref, alt_index) — rows of the same site
+    // Stable sort by (chrom, pos, ref, alt_index) - rows of the same site
     // land contiguous in alt_index order for group_consecutive().
     rows.sort_by(|a, b| {
         (chrom_key(&a.chrom), a.pos, &a.ref_allele, a.alt_index).cmp(&(
@@ -124,7 +124,7 @@ async fn load_sample_header(store: &Store, sample_name: &str) -> Result<Option<S
         .execute()
         .await?;
     let batches: Vec<RecordBatch> = stream.try_collect().await?;
-    // Use the most recent ingest — in practice there's one row per sample.
+    // Use the most recent ingest - in practice there's one row per sample.
     for b in batches.iter().rev() {
         let header = b
             .column_by_name("vcf_header")

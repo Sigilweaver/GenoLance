@@ -8,7 +8,7 @@ use genolance_core::store::Store;
 
 /// Query variants from a GenoLance store.
 ///
-/// If `gene` is provided the store must also contain a `clinvar` table —
+/// If `gene` is provided the store must also contain a `clinvar` table - 
 /// ClinVar positions for that gene are looked up and used as the region
 /// filter.
 pub async fn run(
@@ -24,7 +24,7 @@ pub async fn run(
     let table_names = store.variants.table_names().execute().await?;
     if !table_names.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!(
-            "store {store_path} has no '{VARIANTS_TABLE}' table — did you run `genolance ingest` first?"
+            "store {store_path} has no '{VARIANTS_TABLE}' table - did you run `genolance ingest` first?"
         ));
     }
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
@@ -254,7 +254,7 @@ fn fmt_opt_u32(a: Option<&&UInt32Array>, i: usize) -> String {
 
 fn truncate(s: &str, n: usize) -> String {
     if s.len() > n {
-        format!("{}…", &s[..n.saturating_sub(1)])
+        format!("{}...", &s[..n.saturating_sub(1)])
     } else {
         s.to_string()
     }

@@ -1,4 +1,4 @@
-//! `genolance screen` — combined carrier-screen across N samples with a
+//! `genolance screen` - combined carrier-screen across N samples with a
 //! ClinVar pathogenicity filter. Surfaces sites where every listed
 //! sample carries at least one ALT allele AND the site is annotated
 //! with a matching ClinVar clinical-significance string.
@@ -293,7 +293,7 @@ fn sql_escape(s: &str) -> String {
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() > n {
         let cut: String = s.chars().take(n.saturating_sub(1)).collect();
-        format!("{cut}…")
+        format!("{cut}...")
     } else {
         s.to_string()
     }

@@ -31,10 +31,10 @@ pub struct Filters {
 pub async fn run(store_path: &str, annotation_vcf: &str, f: &Filters) -> Result<()> {
     let store = Store::open(store_path).await?;
 
-    // Make sure the ClinVar table exists — ingest it on demand if missing.
+    // Make sure the ClinVar table exists - ingest it on demand if missing.
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == CLINVAR_TABLE) {
-        println!("[join] '{CLINVAR_TABLE}' table not found; ingesting {annotation_vcf} …");
+        println!("[join] '{CLINVAR_TABLE}' table not found; ingesting {annotation_vcf} ...");
         crate::ingest::run(
             store_path,
             std::slice::from_ref(&annotation_vcf.to_string()),
@@ -257,7 +257,7 @@ fn sql_escape(s: &str) -> String {
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() > n {
         let cut: String = s.chars().take(n.saturating_sub(1)).collect();
-        format!("{cut}…")
+        format!("{cut}...")
     } else {
         s.to_string()
     }

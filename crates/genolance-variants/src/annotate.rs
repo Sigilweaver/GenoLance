@@ -1,15 +1,15 @@
-//! `genolance annotate` — join a sample's variants against any annotation
+//! `genolance annotate` - join a sample's variants against any annotation
 //! VCF on-the-fly and emit configurable INFO fields as output columns.
 //!
 //! Unlike `join`, which reads the pre-ingested `clinvar` table, this
 //! command streams the annotation VCF directly so it works with any
-//! VCF — gnomAD, COSMIC, dbSNP, a local call set, anything. No ingest
+//! VCF - gnomAD, COSMIC, dbSNP, a local call set, anything. No ingest
 //! or schema change needed.
 //!
 //! For large annotations (e.g. whole-genome gnomAD) pair with
 //! `--chrom/--start/--end` to cap the region scanned. If the
 //! annotation VCF has a tabix/CSI index noodles will still do a linear
-//! scan here — position-indexed random-access is a future optimization.
+//! scan here - position-indexed random-access is a future optimization.
 
 use std::collections::HashMap;
 
@@ -52,7 +52,7 @@ pub async fn run(
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
     let mut preds = vec![format!("sample_name = '{}'", sql_escape(sample_name))];
     if let Some(c) = chrom {
-        // Accept either "chr17" or "17" — match both forms in the store.
+        // Accept either "chr17" or "17" - match both forms in the store.
         let bare = c.strip_prefix("chr").unwrap_or(c);
         preds.push(format!(
             "(chrom = '{}' OR chrom = 'chr{}')",
@@ -126,7 +126,7 @@ pub async fn run(
         if let Some(e) = end {
             if pos_v > e {
                 // If sorted by pos we could break, but the file may span multiple
-                // chroms — a full skip only when chrom also matches the filter.
+                // chroms - a full skip only when chrom also matches the filter.
                 if chrom.is_some() {
                     break;
                 } else {

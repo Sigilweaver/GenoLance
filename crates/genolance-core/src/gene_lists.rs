@@ -11,7 +11,7 @@
 /// variants with well-established clinical actionability.
 ///
 /// Current as of v3.2 (published 2023). This list is updated every
-/// ~2 years — verify against the current recommendation before using
+/// ~2 years - verify against the current recommendation before using
 /// in a clinical context.
 pub const ACMG_SF_V3: &[&str] = &[
     // Cancer (hereditary tumor syndromes)

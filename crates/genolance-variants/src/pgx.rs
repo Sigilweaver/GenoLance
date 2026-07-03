@@ -1,4 +1,4 @@
-//! `genolance pgx` — pharmacogenomic screening.
+//! `genolance pgx` - pharmacogenomic screening.
 //!
 //! This is intentionally narrow. Real star-allele diplotype calling
 //! (CYP2D6 especially) needs phased haplotypes plus structural variant
@@ -91,7 +91,7 @@ pub async fn run(store_path: &str, sample: &str, extra_genes: &[String]) -> Resu
         genes.len()
     );
     if cv_map.is_empty() {
-        println!("(no PGx ClinVar variants in store — is clinvar.vcf.gz current?)");
+        println!("(no PGx ClinVar variants in store - is clinvar.vcf.gz current?)");
         return Ok(());
     }
 
@@ -171,7 +171,7 @@ pub async fn run(store_path: &str, sample: &str, extra_genes: &[String]) -> Resu
     println!("{}", "-".repeat(120));
     println!("{} PGx-relevant variants carried by {}", hits.len(), sample);
     println!(
-        "NOTE: screening only — not a diplotype call, not a prescribing \
+        "NOTE: screening only - not a diplotype call, not a prescribing \
          recommendation. Review hits with a clinician against current CPIC \
          guidance (https://cpicpgx.org/)."
     );
@@ -246,7 +246,7 @@ fn sql_escape(s: &str) -> String {
 fn trunc(s: &str, n: usize) -> String {
     if s.chars().count() > n {
         let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
-        out.push('…');
+        out.push('...');
         out
     } else {
         s.to_string()

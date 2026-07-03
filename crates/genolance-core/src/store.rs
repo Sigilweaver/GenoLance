@@ -15,9 +15,9 @@ use lancedb::Connection;
 ///   methyl/               ← future: genolance-methyl layer
 /// ```
 pub struct Store {
-    /// Root connection — holds the `samples` registry table.
+    /// Root connection - holds the `samples` registry table.
     pub conn: Connection,
-    /// Variants-layer connection — holds `calls` and `clinvar` tables.
+    /// Variants-layer connection - holds `calls` and `clinvar` tables.
     pub variants: Connection,
 }
 

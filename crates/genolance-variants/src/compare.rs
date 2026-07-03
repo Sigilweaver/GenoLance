@@ -58,7 +58,7 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
             let g = gt
                 .and_then(|g| (!g.is_null(i)).then(|| g.value(i).to_string()))
                 .unwrap_or_else(|| "./.".to_string());
-            // Skip homozygous-reference calls — they're not really variants.
+            // Skip homozygous-reference calls - they're not really variants.
             if g == "0/0" || g == "0|0" {
                 continue;
             }
@@ -176,7 +176,7 @@ fn print_carrier_screen(
         }
     }
     if n > 200 {
-        println!("… (showing first 200 of {n})");
+        println!("... (showing first 200 of {n})");
     } else {
         println!("{n} sites");
     }
@@ -206,7 +206,7 @@ fn print_private(index: &HashMap<Key, HashMap<String, String>>, samples: &[Strin
                 );
             }
             if v.len() > 20 {
-                println!("  … (+{} more)", v.len() - 20);
+                println!("  ... (+{} more)", v.len() - 20);
             }
         }
     }
@@ -223,7 +223,7 @@ fn col_u64<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a UInt64Array> {
 
 fn truncate(s: &str, n: usize) -> String {
     if s.len() > n {
-        format!("{}…", &s[..n.saturating_sub(1)])
+        format!("{}...", &s[..n.saturating_sub(1)])
     } else {
         s.to_string()
     }

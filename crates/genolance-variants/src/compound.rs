@@ -1,4 +1,4 @@
-//! `genolance compound-het` — flag genes where a single sample carries
+//! `genolance compound-het` - flag genes where a single sample carries
 //! two or more pathogenic/likely-pathogenic heterozygous variants, or
 //! at least one homozygous P/LP variant.
 //!
@@ -151,7 +151,7 @@ pub async fn run(store_path: &str, sample: &str, f: &Filters) -> Result<()> {
         return Ok(());
     }
 
-    println!("Compound-het / homozygous P/LP screen — sample {sample}");
+    println!("Compound-het / homozygous P/LP screen - sample {sample}");
     println!("{}", "-".repeat(100));
     for (gene, hits) in &genes {
         let hets = hits.iter().filter(|h| is_het(&h.gt)).count();
@@ -159,9 +159,9 @@ pub async fn run(store_path: &str, sample: &str, f: &Filters) -> Result<()> {
         let disposition = if homs > 0 {
             format!("HOMOZYGOUS ({} hom{})", homs, plural(homs))
         } else {
-            format!("POSSIBLE COMPOUND HET ({} het P/LP — phase unknown)", hets)
+            format!("POSSIBLE COMPOUND HET ({} het P/LP - phase unknown)", hets)
         };
-        println!("\n{} — {}", gene, disposition);
+        println!("\n{} - {}", gene, disposition);
         for h in hits {
             println!(
                 "  {}:{} {}>{}  GT={:<5} QUAL={:>5.1} DP={:>3}  [{}]  {}",
@@ -297,13 +297,13 @@ fn sql_escape(s: &str) -> String {
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() > n {
         let cut: String = s.chars().take(n.saturating_sub(1)).collect();
-        format!("{cut}…")
+        format!("{cut}...")
     } else {
         s.to_string()
     }
 }
 fn is_het(gt: &str) -> bool {
-    // "0/1", "1/0", "0|1", "1|0", "1/2", etc. — exactly one copy of '1' *or*
+    // "0/1", "1/0", "0|1", "1|0", "1/2", etc. - exactly one copy of '1' *or*
     // any heterozygous call (counts mismatch between the two alleles).
     let alleles: Vec<&str> = gt.split(['/', '|']).collect();
     if alleles.len() != 2 {

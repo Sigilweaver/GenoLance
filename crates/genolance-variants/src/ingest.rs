@@ -461,7 +461,7 @@ fn extract_sample_format_fields(
 
     // Collect everything else into a compact "KEY=VAL;KEY=VAL" blob so
     // `genolance export` can re-emit FORMAT fields we don't model directly
-    // (VAF, MIN_DP, MED_DP, …). Known keys are skipped to avoid duplication.
+    // (VAF, MIN_DP, MED_DP, ...). Known keys are skipped to avoid duplication.
     // Also capture the full key order (all keys, in record order) for faithful
     // FORMAT column reconstruction on export.
     const KNOWN: &[&str] = &["GT", "AD", "DP", "GQ", "PL"];
@@ -533,7 +533,7 @@ fn value_to_string(v: &SampleValue<'_>) -> String {
             out
         }
         SampleValue::Array(arr) => {
-            // Flatten array-valued FORMAT fields (AD, PL, …) into "a,b,c".
+            // Flatten array-valued FORMAT fields (AD, PL, ...) into "a,b,c".
             let parts: Vec<String> = match arr {
                 SampleArray::Integer(a) => a
                     .iter()

@@ -21,7 +21,7 @@ pub fn variant_schema() -> Arc<Schema> {
         Field::new("filter", DataType::Utf8, true), // `;`-joined; None = "."
         // Per-alt split GT: biallelic encoding relative to this ALT ("0/1", "1/1", "./.").
         Field::new("genotype", DataType::Utf8, true),
-        // Original, un-split GT ("1/2", "0|1", …) — preserved for lossless export.
+        // Original, un-split GT ("1/2", "0|1", ...) - preserved for lossless export.
         Field::new("gt_raw", DataType::Utf8, true),
         Field::new("read_depth", DataType::UInt32, true), // FORMAT/DP
         Field::new("format_ad", DataType::Utf8, true),    // allele depths, e.g. "10,5"

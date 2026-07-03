@@ -3,15 +3,15 @@
 //!
 //! Lance supports two scalar index flavors we care about:
 //!
-//! * **BTree** — sorted index. Best on high-cardinality columns with
+//! * **BTree** - sorted index. Best on high-cardinality columns with
 //!   range / equality queries. Used here for `pos` and `variation_id`.
-//! * **Bitmap** — one bitset per distinct value. Best on low-cardinality
+//! * **Bitmap** - one bitset per distinct value. Best on low-cardinality
 //!   columns (dozens to low hundreds of distinct values). Used here for
 //!   `chrom`, `sample_name`, `gene_symbol`, `clinical_significance`.
 //!
 //! All GenoLance query paths issue SQL-like predicates against these
-//! columns (`chrom = 'chr17' AND pos >= … AND pos <= …`,
-//! `sample_name = 'Nathan'`, `gene_symbol IN (…)`), so indexing them
+//! columns (`chrom = 'chr17' AND pos >= ... AND pos <= ...`,
+//! `sample_name = 'Nathan'`, `gene_symbol IN (...)`), so indexing them
 //! gives every existing subcommand a speedup with no caller changes.
 
 use anyhow::{Context, Result};

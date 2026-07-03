@@ -67,7 +67,7 @@ enum Commands {
         against: String,
 
         /// Filter by clinical_significance as a case-insensitive substring
-        /// (e.g. "pathogenic" also matches "Likely_pathogenic" and "Conflicting…").
+        /// (e.g. "pathogenic" also matches "Likely_pathogenic" and "Conflicting...").
         #[arg(long, conflicts_with = "significance_exact")]
         significance: Option<String>,
 
@@ -134,7 +134,7 @@ enum Commands {
     },
 
     /// Flag genes where a single sample carries two or more P/LP heterozygous
-    /// variants (possible compound het — phase unknown with short-read WGS)
+    /// variants (possible compound het - phase unknown with short-read WGS)
     /// or at least one homozygous P/LP variant.
     CompoundHet {
         /// Path to the GenoLance store
@@ -171,8 +171,8 @@ enum Commands {
     },
 
     /// Annotate a sample's variants with arbitrary INFO fields from any VCF.
-    /// Generic alternative to `join` — match on (chrom, pos, ref, alt) against
-    /// any annotation VCF (gnomAD, COSMIC, dbSNP, …) and emit selected INFO
+    /// Generic alternative to `join` - match on (chrom, pos, ref, alt) against
+    /// any annotation VCF (gnomAD, COSMIC, dbSNP, ...) and emit selected INFO
     /// fields as output columns.
     Annotate {
         /// Path to the GenoLance store
@@ -204,7 +204,7 @@ enum Commands {
 
     /// Pharmacogenomic screening: intersect a sample's variants with
     /// ClinVar drug-response annotations in known PGx genes. Screening
-    /// only — not a diplotype call.
+    /// only - not a diplotype call.
     Pgx {
         /// Path to the GenoLance store
         #[arg(short, long)]
