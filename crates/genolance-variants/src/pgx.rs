@@ -246,7 +246,7 @@ fn sql_escape(s: &str) -> String {
 fn trunc(s: &str, n: usize) -> String {
     if s.chars().count() > n {
         let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
-        out.push('...');
+        out.push_str("...");
         out
     } else {
         s.to_string()
