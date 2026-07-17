@@ -228,3 +228,38 @@ fn truncate(s: &str, n: usize) -> String {
         s.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jaccard_of_empty_union_is_zero() {
+        assert_eq!(jaccard(0, 0), 0.0);
+    }
+
+    #[test]
+    fn jaccard_of_full_overlap_is_one() {
+        assert_eq!(jaccard(10, 10), 1.0);
+    }
+
+    #[test]
+    fn jaccard_is_intersection_over_union() {
+        assert!((jaccard(1, 4) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn truncate_short_string_is_unchanged() {
+        assert_eq!(truncate("abc", 10), "abc");
+    }
+
+    #[test]
+    fn truncate_long_string_gets_ellipsis() {
+        assert_eq!(truncate("abcdefgh", 4), "abc...");
+    }
+
+    #[test]
+    fn truncate_at_exact_length_is_unchanged() {
+        assert_eq!(truncate("abcd", 4), "abcd");
+    }
+}

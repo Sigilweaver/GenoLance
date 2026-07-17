@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- _No unreleased changes yet._
+### Testing
+
+- Added the first unit-test suite for `genolance-variants`: 28
+  synthetic-fixture tests covering the pure/transform-heavy helpers in
+  `join`, `compare`, `screen`, and `annotate` (chromosome normalization,
+  SQL predicate/escaping, ClinVar-significance filtering including
+  `acmg_only` and `gene_filter`, carrier-genotype filtering, and the
+  `jaccard`/`truncate` helpers). CI previously ran `cargo test` over an
+  empty test set. (#1, contributed by @Nabejo)
 
 ## [0.2.0] - 2026-05-22
 

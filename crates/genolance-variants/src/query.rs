@@ -8,7 +8,7 @@ use genolance_core::store::Store;
 
 /// Query variants from a GenoLance store.
 ///
-/// If `gene` is provided the store must also contain a `clinvar` table - 
+/// If `gene` is provided the store must also contain a `clinvar` table -
 /// ClinVar positions for that gene are looked up and used as the region
 /// filter.
 pub async fn run(

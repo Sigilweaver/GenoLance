@@ -264,3 +264,77 @@ fn normalize_chrom(c: &str) -> String {
 fn sql_escape(s: &str) -> String {
     s.replace('\'', "''")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    /// Minimal variants-shaped batch covering only the columns `build_carrier_map` reads.
+    fn variants_batch(rows: &[(&str, u64, &str, &str, &str)]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("pos", DataType::UInt64, false),
+            Field::new("ref_allele", DataType::Utf8, false),
+            Field::new("alt_allele", DataType::Utf8, false),
+            Field::new("genotype", DataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(UInt64Array::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.4).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn normalize_chrom_strips_prefix() {
+        assert_eq!(normalize_chrom("chr17"), "17");
+        assert_eq!(normalize_chrom("17"), "17");
+    }
+
+    #[test]
+    fn sql_escape_doubles_single_quotes() {
+        assert_eq!(sql_escape("O'Brien"), "O''Brien");
+    }
+
+    #[test]
+    fn build_carrier_map_normalizes_chrom_and_keys_by_variant() {
+        let batch = variants_batch(&[("chr17", 100, "A", "T", "0/1")]);
+        let map = build_carrier_map(&[batch]);
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.get(&("17".to_string(), 100, "A".to_string(), "T".to_string()))
+                .map(String::as_str),
+            Some("0/1")
+        );
+    }
+
+    #[test]
+    fn build_carrier_map_skips_homozygous_reference_calls() {
+        let batch = variants_batch(&[
+            ("1", 100, "A", "T", "0/0"),
+            ("1", 200, "C", "G", "0/1"),
+            ("1", 300, "G", "A", "./."),
+        ]);
+        let map = build_carrier_map(&[batch]);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&("1".to_string(), 200, "C".to_string(), "G".to_string())));
+    }
+}

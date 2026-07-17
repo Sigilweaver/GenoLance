@@ -298,3 +298,111 @@ fn truncate(s: &str, n: usize) -> String {
         s.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    /// Minimal ClinVar-shaped batch covering only the columns `build_clinvar_map` reads.
+    fn clinvar_batch(rows: &[(&str, u64, &str, &str, &str, &str, &str)]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("pos", DataType::UInt64, false),
+            Field::new("ref_allele", DataType::Utf8, false),
+            Field::new("alt_allele", DataType::Utf8, false),
+            Field::new("gene_symbol", DataType::Utf8, true),
+            Field::new("clinical_significance", DataType::Utf8, true),
+            Field::new("disease_name", DataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(UInt64Array::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.4).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.5).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.6).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn normalize_chrom_strips_prefix() {
+        assert_eq!(normalize_chrom("chr1"), "1");
+        assert_eq!(normalize_chrom("1"), "1");
+    }
+
+    #[test]
+    fn sql_escape_doubles_single_quotes() {
+        assert_eq!(sql_escape("O'Brien"), "O''Brien");
+    }
+
+    #[test]
+    fn truncate_long_string_gets_ellipsis() {
+        assert_eq!(truncate("abcdefgh", 4), "abc...");
+    }
+
+    #[test]
+    fn build_clinvar_predicate_defaults_to_pathogenic_substring() {
+        // Unlike join's predicate, screen defaults to "pathogenic" rather
+        // than matching everything when no filter is given.
+        assert_eq!(
+            build_clinvar_predicate(&Filters::default()),
+            "lower(clinical_significance) LIKE '%pathogenic%'"
+        );
+    }
+
+    #[test]
+    fn build_clinvar_predicate_prefers_exact_list_over_substring() {
+        let f = Filters {
+            significance_exact: Some(vec!["Pathogenic".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_clinvar_predicate(&f),
+            "(lower(clinical_significance) = 'pathogenic')"
+        );
+    }
+
+    #[test]
+    fn build_clinvar_map_normalizes_chrom_and_keys_by_variant() {
+        let batch = clinvar_batch(&[("chr1", 100, "A", "T", "BRCA1", "Pathogenic", "Cancer")]);
+        let map = build_clinvar_map(&[batch], &Filters::default());
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&("1".to_string(), 100, "A".to_string(), "T".to_string())));
+    }
+
+    #[test]
+    fn build_clinvar_map_acmg_only_filters_out_non_acmg_genes() {
+        let batch = clinvar_batch(&[
+            ("1", 100, "A", "T", "BRCA1", "Pathogenic", "Cancer"), // in ACMG_SF_V3
+            ("1", 200, "C", "G", "NOTAREALGENE", "Pathogenic", "Other"),
+        ]);
+        let f = Filters {
+            acmg_only: true,
+            ..Default::default()
+        };
+        let map = build_clinvar_map(&[batch], &f);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&("1".to_string(), 100, "A".to_string(), "T".to_string())));
+    }
+}
