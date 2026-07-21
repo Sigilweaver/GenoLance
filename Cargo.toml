@@ -26,8 +26,9 @@ unsafe_code = "forbid"
 [workspace.dependencies]
 noodles      = { version = "0", features = ["vcf", "bcf", "bgzf", "csi"] }
 lancedb      = "0"
-arrow-array  = "=57.3.0"
-arrow-schema = "=57.3.0"
+# Arrow columnar types (pinned to match lancedb 0.31's transitive dep)
+arrow-array  = "=58.3.0"
+arrow-schema = "=58.3.0"
 futures      = "0.3"
 tokio        = { version = "1", features = ["full"] }
 clap         = { version = "4", features = ["derive"] }
