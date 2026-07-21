@@ -1,9 +1,7 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::num::NonZero;
 use std::path::Path;
 use std::sync::Arc;
-use std::thread;
 
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Float32Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
@@ -84,15 +82,15 @@ async fn ingest_one(store: &Store, path: &str, sample_override: Option<&str>) ->
 /// `.vcf` use a standard buffered file reader. The returned reader is
 /// erased to `Box<dyn BufRead + Send>` so both paths share the same
 /// downstream ingest code.
+///
+/// As of noodles-bgzf 0.48, `MultithreadedReader` decompresses on rayon's
+/// global thread pool rather than a caller-specified worker count; configure
+/// pool size via `rayon::ThreadPoolBuilder` at the process level if needed.
 fn open_vcf_reader(path: &str) -> Result<vcf::io::Reader<Box<dyn BufRead + Send>>> {
     let is_bgzf = path.ends_with(".gz") || path.ends_with(".bgz") || path.ends_with(".bcf");
     let file = File::open(path).with_context(|| format!("open {path}"))?;
     if is_bgzf {
-        let workers = thread::available_parallelism()
-            .map(|n| n.get().clamp(1, 4))
-            .unwrap_or(2);
-        let mt =
-            bgzf::io::MultithreadedReader::with_worker_count(NonZero::new(workers).unwrap(), file);
+        let mt = bgzf::io::MultithreadedReader::new(file);
         Ok(vcf::io::Reader::new(Box::new(mt) as Box<dyn BufRead + Send>))
     } else {
         Ok(vcf::io::Reader::new(
