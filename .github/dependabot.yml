@@ -4,6 +4,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # Pinned to match lancedb 0.31's transitive arrow dependency (see Cargo.toml).
+      # Bumping past 58.3.0 breaks the build until lancedb updates.
+      - dependency-name: "arrow-array"
+      - dependency-name: "arrow-schema"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
