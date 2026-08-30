@@ -3929,9 +3929,9 @@ dependencies = [
 
 [[package]]
 name = "noodles"
-version = "0.115.0"
+version = "0.116.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ef86cb036ab589c660e76bc6d7741454fe8ff71ba3348f71812936f5c1a43f6"
+checksum = "3dbd47509acffd4a7e23fcc174a022fe172d3edbf63e177b84ab0bacd5e7f7aa"
 dependencies = [
  "noodles-bcf",
  "noodles-bgzf",
@@ -3941,9 +3941,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-bcf"
-version = "0.90.0"
+version = "0.91.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd9a79f13b7808cdd210253bb1034b0a46184bd63bb67f35d8796ecbf6a29010"
+checksum = "4bd215f6b04b23cd3ac551834833aa070f1e6182dc8c16a32918e7aedf7480c4"
 dependencies = [
  "indexmap 2.14.0",
  "memchr",
@@ -3976,9 +3976,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-csi"
-version = "0.60.0"
+version = "0.61.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32789eeba9c4001d50de853a4c6a8f0551d586a91d6919c0008dd462231feacb"
+checksum = "59b884d95b1c04066f2364201f4ba126b1fdc590841745c226952c424fceeb02"
 dependencies = [
  "bit-vec",
  "bstr",
@@ -3989,9 +3989,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-tabix"
-version = "0.66.0"
+version = "0.67.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52c0b2afdd167cb7943f8e655ac9f37d4403b93b978fe8d192faece39d844cbc"
+checksum = "8819545ace427054ea761dbfd5a019cccb68fdd25d216e2b4b6275b723d95fc0"
 dependencies = [
  "bstr",
  "indexmap 2.14.0",
@@ -4002,9 +4002,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-vcf"
-version = "0.92.0"
+version = "0.93.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59ba2606faec4bee364b0143191d7dbfd9357d61a1ad65651a58b42df540b9cb"
+checksum = "84f5a470aa883869223f8a92f0da5181bef1d6802d6b44ac95fe230e84674685"
 dependencies = [
  "indexmap 2.14.0",
  "memchr",
