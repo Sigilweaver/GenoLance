@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Updated the transitive TLS dependencies to rustls 0.23.45 and
+  rustls-webpki 0.103.15 to fix RUSTSEC-2026-0285.
+
 ### Testing
 
 - Added the first unit-test suite for `genolance-variants`: 28
