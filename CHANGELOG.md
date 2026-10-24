@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Updated the transitive TLS dependencies to rustls 0.23.45 and
+  rustls-webpki 0.103.15 to fix RUSTSEC-2026-0285.
+- Updated `quinn-proto` to 0.11.19, `rustls` to 0.23.46, and `rustls-webpki`
+  to 0.103.16 in the lockfile, clearing RUSTSEC-2026-0338 through -0342,
+  RUSTSEC-2026-0346 through -0349, and RUSTSEC-2026-0382. Also updated
+  `tokio` (RUSTSEC-2026-0386), `memmap2` (RUSTSEC-2026-0186),
+  `event-listener` (RUSTSEC-2026-0221), and `chacha20` (yanked). No code or
+  API changes.
+
 ### Testing
 
 - Added the first unit-test suite for `genolance-variants`: 28
