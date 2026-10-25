@@ -330,3 +330,27 @@ async fn truncated_clinvar_is_rejected_and_rolled_back() {
     assert!(matches!(ingest_error(&e), Error::Truncated { .. }));
     assert_eq!(clinvar_count(&t.store()).await, 0);
 }
+
+// S12: plain gzip and non-gzip files named .gz get their own message.
+#[tokio::test]
+async fn plain_gzip_and_fake_gz_are_not_reported_as_truncated() {
+    let t = Tmp::new();
+    // An empty gzip member: magic, deflate, no FEXTRA, stored empty block.
+    let plain_gzip: [u8; 20] = [
+        0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0, 0xff, 0x03, 0x00, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    std::fs::write(t.path("plain.vcf.gz"), plain_gzip).unwrap();
+    let e = ingest_file(&t.store(), &t.path("plain.vcf.gz"))
+        .await
+        .unwrap_err();
+    let msg = format!("{e:#}");
+    assert!(msg.contains("plain gzip"), "{msg}");
+    assert!(msg.contains("bgzip"), "{msg}");
+    assert!(!msg.contains("truncated"), "{msg}");
+
+    write_plain(&t.path("fake.vcf.gz"), &vcf("S1", &[GOOD]));
+    let e = ingest_file(&t.store(), &t.path("fake.vcf.gz"))
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("gzip magic"), "{e:#}");
+}

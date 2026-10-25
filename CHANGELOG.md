@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `genolance ingest` now returns an error instead of storing a wrong or
   partial result when:
   - a `.gz`/`.bgz` file lacks the BGZF end-of-file block, or the last line
-    has no newline (truncated file);
+    has no newline (truncated file); a plain-gzip file (not BGZF) and a file
+    that is not gzip at all get their own messages;
   - a record has fewer or more sample columns than the header, or lists a
     FORMAT key twice;
   - a genotype is malformed or names an allele beyond the ALT list, a FORMAT

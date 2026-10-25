@@ -379,6 +379,7 @@ fn open_vcf_reader(path: &str) -> Result<(vcf::io::Reader<Box<dyn BufRead + Send
     let mut file = File::open(path).with_context(|| format!("open {path}"))?;
     let last = Arc::new(AtomicU16::new(NO_BYTE));
     let inner: Box<dyn BufRead + Send> = if is_bgzf {
+        check_bgzf_header(&mut file, path)?;
         let len = file.metadata()?.len();
         let mut tail = [0u8; 28];
         let has_eof = len >= 28 && {
@@ -407,6 +408,34 @@ fn open_vcf_reader(path: &str) -> Result<(vcf::io::Reader<Box<dyn BufRead + Send
         vcf::io::Reader::new(Box::new(tracked) as Box<dyn BufRead + Send>),
         TailCheck(last),
     ))
+}
+
+/// Tell BGZF from plain gzip (and from not-gzip-at-all) by the file's first
+/// bytes, so the error names the real problem. A BGZF block starts with the
+/// gzip magic, the FEXTRA flag, and an extra subfield with id "BC".
+/// Source: SAM/BAM specification (hts-specs, SAMv1.pdf), section 4.1 "The BGZF
+/// compression format".
+fn check_bgzf_header(file: &mut File, path: &str) -> Result<()> {
+    let mut head = [0u8; 18];
+    let n = file.read(&mut head)?;
+    file.seek(SeekFrom::Start(0))?;
+    if n < 2 || head[0] != 0x1f || head[1] != 0x8b {
+        return Err(Error::UnrecognizedInput {
+            path: path.to_string(),
+            reason: "the name says compressed, but the file does not start with the gzip magic bytes; decompress or rename it".into(),
+        }
+        .into());
+    }
+    let has_bc = n >= 18 && head[3] & 0x04 != 0 && &head[12..14] == b"BC";
+    if !has_bc {
+        return Err(Error::UnrecognizedInput {
+            path: path.to_string(),
+            reason: "plain gzip, not BGZF; recompress it with `bgzip` (or `bcftools view -Oz`)"
+                .into(),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Open the named table or create an empty one with the given schema.
