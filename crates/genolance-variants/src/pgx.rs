@@ -13,14 +13,13 @@
 //! variants for a clinician; *not* a diplotype call and *not*
 //! a prescribing recommendation.
 
-use anyhow::{anyhow, Result};
 use arrow_array::{Array, RecordBatch};
 use futures::TryStreamExt;
+use genolance_core::{Error, Result};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
 use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
-use genolance_core::Error;
 
 use crate::common::{
     build_clinvar_map, carrier_state, ensure_clinvar_unique, normalize_chrom, opt_string, req_str,
@@ -55,11 +54,12 @@ pub async fn run(
     let store = Store::open(store_path).await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
-        return Err(anyhow!("store has no '{VARIANTS_TABLE}' table"));
+        return Err(Error::missing_table(VARIANTS_TABLE, "ingest it first"));
     }
     if !tables.iter().any(|n| n == CLINVAR_TABLE) {
-        return Err(anyhow!(
-            "store has no '{CLINVAR_TABLE}' table; ingest clinvar.vcf.gz first"
+        return Err(Error::missing_table(
+            CLINVAR_TABLE,
+            "ingest clinvar.vcf.gz first",
         ));
     }
 
@@ -68,9 +68,9 @@ pub async fn run(
     for g in extra_genes {
         let g = g.trim().to_uppercase();
         if g.is_empty() {
-            return Err(
-                Error::InvalidArgument("--genes contains an empty gene symbol".into()).into(),
-            );
+            return Err(Error::InvalidArgument(
+                "--genes contains an empty gene symbol".into(),
+            ));
         }
         if !genes.iter().any(|x| x.eq_ignore_ascii_case(&g)) {
             genes.push(g.clone());
@@ -104,15 +104,9 @@ pub async fn run(
         }
         let missing: Vec<&String> = requested.iter().filter(|g| !present.contains(*g)).collect();
         if !missing.is_empty() {
-            return Err(Error::InvalidArgument(format!(
-                "no ClinVar rows for requested gene(s): {}",
-                missing
-                    .iter()
-                    .map(|g| g.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
-            .into());
+            return Err(Error::unknown_gene(
+                missing.iter().map(|g| g.to_string()).collect(),
+            ));
         }
     }
     let gene_in = genes

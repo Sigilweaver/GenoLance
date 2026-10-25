@@ -9,16 +9,15 @@
 use std::collections::BTreeMap;
 use std::io::{BufWriter, Write};
 
-use anyhow::{anyhow, Context, Result};
 use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
 use futures::TryStreamExt;
+use genolance_core::{Error, Result, ResultExt};
 use lancedb::query::{ExecutableQuery, QueryBase};
 
 use genolance_core::schema::{SAMPLES_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
 
-use crate::common::{chrom_predicate, normalize_chrom, require_samples};
-use genolance_core::Error;
+use crate::common::{chrom_predicate, missing_column, normalize_chrom, require_samples};
 
 /// Run `genolance export`.
 ///
@@ -36,8 +35,9 @@ pub async fn run(
 
     let var_tables = store.variants.table_names().execute().await?;
     if !var_tables.iter().any(|n| n == VARIANTS_TABLE) {
-        return Err(anyhow!(
-            "store has no '{VARIANTS_TABLE}' table; ingest a sample VCF first"
+        return Err(Error::missing_table(
+            VARIANTS_TABLE,
+            "ingest a sample VCF first",
         ));
     }
 
@@ -83,10 +83,9 @@ pub async fn run(
     });
 
     if rows.is_empty() && (chrom.is_some() || start.is_some() || end.is_some()) {
-        return Err(anyhow!(
-            "no variants of sample '{sample_name}' match the region filter ({}); \
-             check the contig name and positions",
-            region_text(chrom, start, end)
+        return Err(Error::region_empty(
+            format!("sample '{sample_name}'"),
+            region_text(chrom, start, end),
         ));
     }
 
@@ -149,13 +148,6 @@ async fn load_sample_header(store: &Store, sample_name: &str) -> Result<Option<S
     Ok(None)
 }
 
-fn missing_column(table: &str, column: &str) -> anyhow::Error {
-    Error::InvalidArgument(format!(
-        "table '{table}' has no column '{column}' of the expected type; the store was written by an incompatible version"
-    ))
-    .into()
-}
-
 /// Write a stored header with its `#CHROM` line rewritten to name exactly
 /// the exported sample.
 fn write_header_for_sample<W: Write>(w: &mut W, text: &str, sample_name: &str) -> Result<()> {
@@ -170,7 +162,7 @@ fn write_header_for_sample<W: Write>(w: &mut W, text: &str, sample_name: &str) -
         }
     }
     if !saw_chrom {
-        return Err(anyhow!(
+        return Err(invalid!(
             "stored header for '{sample_name}' has no #CHROM line"
         ));
     }
@@ -256,14 +248,8 @@ fn collect_rows(b: &RecordBatch, out: &mut Vec<Row>) -> Result<()> {
 /// attributed to records without guessing and is an error.
 fn records_at_site<'a>(site: &[&'a Row]) -> Result<Vec<Vec<&'a Row>>> {
     let head = site[0];
-    let ambiguous = |why: String| -> anyhow::Error {
-        Error::MalformedRecord {
-            chrom: head.chrom.clone(),
-            pos: head.pos,
-            field: "alt rows".into(),
-            reason: why,
-        }
-        .into()
+    let ambiguous = |why: String| -> Error {
+        Error::malformed_record(head.chrom.clone(), head.pos, "alt rows", why)
     };
     let mut records: Vec<Vec<&'a Row>> = Vec::new();
     let mut by_count: BTreeMap<u32, Vec<&'a Row>> = BTreeMap::new();
@@ -598,15 +584,15 @@ pub async fn run_merge(
     output_path: Option<&str>,
 ) -> Result<()> {
     if sample_names.len() < 2 {
-        return Err(anyhow!(
-            "--merge requires at least two samples; got {}",
+        return Err(invalid!(
+            "merging needs at least two samples; got {}",
             sample_names.len()
         ));
     }
     let store = Store::open(store_path).await?;
     let var_tables = store.variants.table_names().execute().await?;
     if !var_tables.iter().any(|n| n == VARIANTS_TABLE) {
-        return Err(anyhow!("store has no '{VARIANTS_TABLE}' table"));
+        return Err(Error::missing_table(VARIANTS_TABLE, "ingest it first"));
     }
     require_samples(&store, sample_names).await?;
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
@@ -660,15 +646,9 @@ pub async fn run_merge(
                 records_at_site(&refs)?.len()
             };
             if n_records != 1 {
-                return Err(Error::MalformedRecord {
-                    chrom: head_key.0,
-                    pos: head_key.1,
-                    field: "merge".into(),
-                    reason: format!(
+                return Err(Error::malformed_record(head_key.0, head_key.1, "merge", format!(
                         "sample '{s}' has {n_records} separate records at this position and reference (split multi-allelic input); they cannot be merged into one column without guessing"
-                    ),
-                }
-                .into());
+                    )));
             }
             per_sample[idx].insert(head_key, group);
         }
@@ -681,10 +661,9 @@ pub async fn run_merge(
     sites.dedup();
 
     if sites.is_empty() && (chrom.is_some() || start.is_some() || end.is_some()) {
-        return Err(anyhow!(
-            "no variants of the listed samples match the region filter ({}); \
-             check the contig name and positions",
-            region_text(chrom, start, end)
+        return Err(Error::region_empty(
+            "the listed samples",
+            region_text(chrom, start, end),
         ));
     }
 
@@ -709,7 +688,7 @@ pub async fn run_merge(
     }
     w.flush()?;
     eprintln!(
-        "[export --merge] wrote {} sites for {} samples",
+        "[export] wrote {} sites for {} samples",
         lines.len(),
         sample_names.len()
     );
@@ -880,14 +859,8 @@ fn build_merged_sample_column(
     merged_alts: &[String],
     key: &(String, u64, String),
 ) -> Result<String> {
-    let bad = |field: &str, reason: String| -> anyhow::Error {
-        Error::MalformedRecord {
-            chrom: key.0.clone(),
-            pos: key.1,
-            field: field.into(),
-            reason,
-        }
-        .into()
+    let bad = |field: &str, reason: String| -> Error {
+        Error::malformed_record(key.0.clone(), key.1, field, reason)
     };
     let mut sorted: Vec<&Row> = rows.iter().collect();
     sorted.sort_by_key(|r| r.alt_index);

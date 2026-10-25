@@ -14,7 +14,7 @@
 //! `sample_name = 'Nathan'`, `gene_symbol IN (...)`), so indexing them
 //! gives every existing subcommand a speedup with no caller changes.
 
-use anyhow::{Context, Result};
+use genolance_core::{Result, ResultExt};
 use lancedb::index::{
     scalar::{BTreeIndexBuilder, BitmapIndexBuilder},
     Index,

@@ -1,3 +1,10 @@
+/// Build an `Error::InvalidArgument` from a format string.
+macro_rules! invalid {
+    ($($t:tt)*) => {
+        genolance_core::Error::InvalidArgument(format!($($t)*))
+    };
+}
+
 pub mod annotate;
 mod common;
 pub mod compare;

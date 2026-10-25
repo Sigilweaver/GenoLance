@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::Result;
 use lancedb::Connection;
 
 /// A handle to an open GenoLance store.

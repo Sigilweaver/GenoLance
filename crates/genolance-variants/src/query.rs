@@ -1,11 +1,10 @@
-use anyhow::{anyhow, Result};
 use arrow_array::{Array, RecordBatch, StringArray, UInt64Array};
 use futures::TryStreamExt;
+use genolance_core::{Error, Result};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
 use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
-use genolance_core::Error;
 
 use crate::common::{
     chrom_forms, chrom_predicate, fmt_dp, fmt_qual, opt_string, req_f32, req_str, req_u32, req_u64,
@@ -52,7 +51,7 @@ pub async fn run(
 
     let table_names = store.variants.table_names().execute().await?;
     if !table_names.iter().any(|n| n == VARIANTS_TABLE) {
-        return Err(anyhow!(
+        return Err(invalid!(
             "store {store_path} has no '{VARIANTS_TABLE}' table - did you run `genolance ingest` first?"
         ));
     }
@@ -74,7 +73,7 @@ pub async fn run(
     // Gene → positions via ClinVar.
     if let Some(g) = gene {
         if !table_names.iter().any(|n| n == CLINVAR_TABLE) {
-            return Err(anyhow!(
+            return Err(invalid!(
                 "--gene requires a '{CLINVAR_TABLE}' table; ingest clinvar.vcf.gz first"
             ));
         }
@@ -91,9 +90,7 @@ pub async fn run(
         let batches: Vec<RecordBatch> = stream.try_collect().await?;
         let positions = collect_chrom_pos(&batches);
         if positions.is_empty() {
-            return Err(anyhow!(
-                "no ClinVar rows for gene '{g}' (symbols match case-insensitively); check the spelling"
-            ));
+            return Err(Error::unknown_gene(vec![g.to_string()]));
         }
         predicates.push(region_predicate(&positions));
     }

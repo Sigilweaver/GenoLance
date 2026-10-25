@@ -13,9 +13,9 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Context, Result};
 use arrow_array::RecordBatch;
 use futures::TryStreamExt;
+use genolance_core::{Error, Result, ResultExt};
 use lancedb::query::{ExecutableQuery, QueryBase};
 use noodles::vcf::{
     self as vcf,
@@ -24,7 +24,6 @@ use noodles::vcf::{
 
 use genolance_core::schema::VARIANTS_TABLE;
 use genolance_core::store::Store;
-use genolance_core::Error;
 
 use crate::common::{
     carrier_state, chrom_predicate, normalize_chrom, opt_string, req_str, req_u64, require_samples,
@@ -45,7 +44,7 @@ pub async fn run(
     end: Option<u64>,
 ) -> Result<()> {
     if info_fields.is_empty() {
-        return Err(anyhow!(
+        return Err(invalid!(
             "--info is required (comma-separated INFO keys to extract)"
         ));
     }
@@ -53,7 +52,7 @@ pub async fn run(
     let store = Store::open(store_path).await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
-        return Err(anyhow!("store has no '{VARIANTS_TABLE}' table"));
+        return Err(Error::missing_table(VARIANTS_TABLE, "ingest it first"));
     }
 
     require_samples(&store, std::slice::from_ref(&sample_name.to_string())).await?;
@@ -70,19 +69,22 @@ pub async fn run(
         .filter(|f| !header.infos().contains_key(f.as_str()))
         .collect();
     if !undeclared.is_empty() {
-        return Err(anyhow!(
-            "{annotation_vcf} does not declare INFO key(s) {}; declared keys: {}",
-            undeclared
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-            header
-                .infos()
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
+        return Err(Error::unrecognized_input(
+            annotation_vcf,
+            format!(
+                "does not declare INFO key(s) {}; declared keys: {}",
+                undeclared
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                header
+                    .infos()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         ));
     }
 
@@ -247,8 +249,14 @@ fn extract_info(
 ) -> Result<String> {
     use vcf::header::record::value::map::info::Number;
     use vcf::variant::record::info::field::value::Array;
-    let bad = |reason: String| -> anyhow::Error {
-        Error::InvalidArgument(format!("INFO/{field}: {reason}")).into()
+    let chrom = record.reference_sequence_name().to_string();
+    let pos = record
+        .variant_start()
+        .and_then(|p| p.ok())
+        .map(|p| usize::from(p) as u64)
+        .unwrap_or(0);
+    let bad = |reason: String| -> Error {
+        Error::malformed_record(chrom.clone(), pos, format!("INFO/{field}"), reason)
     };
     let info = record.info();
     let value = match info.get(header, field) {

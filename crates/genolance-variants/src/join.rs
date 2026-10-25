@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Result};
 use arrow_array::{Array, RecordBatch};
 use futures::TryStreamExt;
+use genolance_core::{Error, Result};
 use lancedb::query::{ExecutableQuery, QueryBase};
 
 use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
@@ -36,14 +36,14 @@ pub async fn run(store_path: &str, annotation_vcf: Option<&str>, f: &Filters) ->
     let have_clinvar = tables.iter().any(|n| n == CLINVAR_TABLE);
     match (have_clinvar, annotation_vcf) {
         (true, Some(file)) => {
-            return Err(anyhow!(
+            return Err(invalid!(
                 "the store already holds a ClinVar release, so `join` would ignore {file}; \
                  drop --against to use the stored release, or load the file with \
                  `genolance ingest --replace {file}`"
             ));
         }
         (false, None) => {
-            return Err(anyhow!(
+            return Err(invalid!(
                 "the store has no '{CLINVAR_TABLE}' table; pass --against <clinvar.vcf.gz> or run `genolance ingest` on it first"
             ));
         }
@@ -67,8 +67,9 @@ pub async fn run(store_path: &str, annotation_vcf: Option<&str>, f: &Filters) ->
             .iter()
             .any(|n| n == VARIANTS_TABLE)
     {
-        return Err(anyhow!(
-            "store has no '{VARIANTS_TABLE}' table; ingest a sample VCF first"
+        return Err(Error::missing_table(
+            VARIANTS_TABLE,
+            "ingest a sample VCF first",
         ));
     }
 
