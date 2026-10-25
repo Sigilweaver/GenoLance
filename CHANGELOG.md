@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   partial result when:
   - a `.gz`/`.bgz` file lacks the BGZF end-of-file block, or the last line
     has no newline (truncated file);
-  - a record has fewer or more sample columns than the header;
+  - a record has fewer or more sample columns than the header, or lists a
+    FORMAT key twice;
   - a genotype is malformed or names an allele beyond the ALT list, a FORMAT
     or INFO array element does not parse, QUAL does not parse, the ALT list
     mixes `.`/empty alleles with real ones, or INFO/AF does not match its

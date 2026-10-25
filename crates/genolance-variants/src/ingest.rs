@@ -900,6 +900,9 @@ fn extract_sample_format_fields(
     for result in sample.iter(header) {
         let (key, value) = result.map_err(|e| invalid_format(chrom, pos, "*", e))?;
         let raw = raw_values.next().unwrap_or(".");
+        if all_keys.iter().any(|k| k == key) {
+            return Err(invalid_format(chrom, pos, key, "FORMAT key appears twice"));
+        }
         all_keys.push(key.to_string());
         if let Some(v) = &value {
             check_sample_value(v).map_err(|e| invalid_format(chrom, pos, key, e))?;
