@@ -205,6 +205,14 @@ pub(crate) fn is_unnormalizable(a: &str) -> bool {
     a.starts_with('<') || a.contains('[') || a.contains(']') || a == "*" || a == "."
 }
 
+/// The error for a BCF input: BCF is not supported by any command.
+pub(crate) fn bcf_unsupported(path: &str) -> Error {
+    Error::unrecognized_input(
+        path,
+        "BCF input is not supported; convert it to VCF first (for example `bcftools view -Oz`)",
+    )
+}
+
 pub(crate) fn fmt_qual(q: Option<f32>) -> String {
     q.map(|v| format!("{v:.1}")).unwrap_or_else(|| ".".into())
 }

@@ -13,13 +13,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Ingest one or more VCF/BCF files into a GenoLance store
+    /// Ingest one or more VCF files into a GenoLance store
     Ingest {
         /// Path to the GenoLance store (created if it doesn't exist)
         #[arg(short, long)]
         store: String,
 
-        /// VCF/BCF files to ingest
+        /// VCF files to ingest (plain or BGZF-compressed)
         #[arg(required = true)]
         files: Vec<String>,
 
@@ -245,7 +245,7 @@ enum Commands {
         #[arg(long)]
         sample: String,
 
-        /// Annotation VCF/BCF to match against
+        /// Annotation VCF to match against
         #[arg(long)]
         vcf: String,
 
@@ -290,14 +290,13 @@ enum Commands {
     },
 
     /// Export variants for a sample back to VCF (reconstructs original header).
-    /// Pass `--merge` with multiple `--sample` values to emit a multi-sample VCF.
+    /// Repeat `--sample` to emit a merged multi-sample VCF.
     Export {
         /// Path to the GenoLance store
         #[arg(short, long)]
         store: String,
 
-        /// Sample name to export. Repeat for a merged multi-sample VCF when
-        /// combined with `--merge`.
+        /// Sample name to export. Repeat for a merged multi-sample VCF.
         #[arg(long)]
         sample: Vec<String>,
 
@@ -316,10 +315,6 @@ enum Commands {
         /// Output path (default: stdout)
         #[arg(short, long)]
         output: Option<String>,
-
-        /// Merge multiple samples into one VCF with one column per sample
-        #[arg(long)]
-        merge: bool,
     },
 
     /// Build scalar indices on (chrom, pos) and other hot columns so
@@ -498,9 +493,8 @@ async fn run(cli: Cli) -> genolance_core::Result<()> {
             start,
             end,
             output,
-            merge,
         } => {
-            if merge || sample.len() > 1 {
+            if sample.len() > 1 {
                 genolance_variants::export::run_merge(
                     &store,
                     &sample,

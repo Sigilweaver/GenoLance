@@ -509,7 +509,10 @@ impl<R: BufRead> BufRead for TrackingReader<R> {
 pub(crate) fn open_vcf_reader(
     path: &str,
 ) -> Result<(vcf::io::Reader<Box<dyn BufRead + Send>>, TailCheck)> {
-    let is_bgzf = path.ends_with(".gz") || path.ends_with(".bgz") || path.ends_with(".bcf");
+    if path.ends_with(".bcf") {
+        return Err(crate::common::bcf_unsupported(path));
+    }
+    let is_bgzf = path.ends_with(".gz") || path.ends_with(".bgz");
     let mut file = File::open(path).with_context(|| format!("open {path}"))?;
     let last = Arc::new(AtomicU16::new(NO_BYTE));
     let inner: Box<dyn BufRead + Send> = if is_bgzf {

@@ -24,7 +24,7 @@ unsafe_code = "forbid"
 
 # ---- Shared dependency versions (used by all crates via workspace.dependencies) ----
 [workspace.dependencies]
-noodles      = { version = "0", features = ["vcf", "bcf", "bgzf", "csi"] }
+noodles      = { version = "0", features = ["vcf", "bgzf"] }
 lancedb      = "0"
 # Arrow columnar types (pinned to match lancedb 0.31's transitive dep)
 arrow-array  = "=58.3.0"

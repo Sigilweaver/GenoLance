@@ -662,3 +662,52 @@ fn missing_store_exits_with_code_2_and_creates_nothing() {
     assert_eq!(o.status.code(), Some(2));
     assert!(!std::path::Path::new(&t.path("nope")).exists());
 }
+
+// BCF is not supported anywhere: say so instead of failing on a header parse.
+#[test]
+fn bcf_input_is_rejected_with_a_clear_message() {
+    let t = Tmp::new();
+    std::fs::write(t.path("x.bcf"), b"BCF\x02\x02").unwrap();
+    let o = gl(&["ingest", "-s", &t.store(), &t.path("x.bcf")]);
+    assert_eq!(o.status.code(), Some(3));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("BCF input is not supported"), "{err}");
+}
+
+// Repeating --sample merges; --merge no longer exists.
+#[test]
+fn repeated_sample_merges_and_merge_flag_is_gone() {
+    let t = Tmp::new();
+    for (n, name) in [("a", "A"), ("b", "B")] {
+        std::fs::write(
+            t.path(&format!("{n}.vcf")),
+            sample_vcf(name, &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"]),
+        )
+        .unwrap();
+        ok(&["ingest", "-s", &t.store(), &t.path(&format!("{n}.vcf"))]);
+    }
+    let (out, _) = ok(&["export", "-s", &t.store(), "--sample", "A", "--sample", "B"]);
+    let chrom = out.lines().find(|l| l.starts_with("#CHROM")).unwrap();
+    assert!(chrom.ends_with("FORMAT\tA\tB"), "{chrom}");
+    let o = gl(&["export", "-s", &t.store(), "--sample", "A", "--merge"]);
+    assert_eq!(o.status.code(), Some(2));
+}
+
+// Exit codes: 2 for a request that cannot be honoured, 3 for rejected input.
+#[test]
+fn exit_codes_follow_the_error_kind() {
+    let t = Tmp::new();
+    setup(&t, &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"], &[CV_1]);
+    let o = gl(&[
+        "join",
+        "-s",
+        &t.store(),
+        "--against",
+        &t.path("cv.vcf"),
+        "--significance-exact",
+        "",
+    ]);
+    assert_eq!(o.status.code(), Some(2));
+    let o = gl(&["ingest", "-s", &t.store(), &t.path("s.vcf")]);
+    assert_eq!(o.status.code(), Some(3), "duplicate sample");
+}

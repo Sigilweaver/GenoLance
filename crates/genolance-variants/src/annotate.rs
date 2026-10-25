@@ -112,6 +112,10 @@ pub async fn run(
         }
     }
 
+    if annotation_vcf.ends_with(".bcf") {
+        return Err(crate::common::bcf_unsupported(annotation_vcf));
+    }
+
     // 1. Pull sample variants for the region.
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
     let mut preds = vec![format!("sample_name = '{}'", sql_escape(sample_name))];
