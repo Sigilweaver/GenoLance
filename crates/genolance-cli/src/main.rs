@@ -24,9 +24,22 @@ enum Commands {
         #[arg(required = true)]
         files: Vec<String>,
 
-        /// Override the sample name (defaults to the sample name in the VCF header)
+        /// Override the sample name (defaults to the sample name in the VCF header).
+        /// Only valid with a single file.
         #[arg(long)]
         sample: Option<String>,
+
+        /// Sample column to ingest from a multi-sample VCF
+        #[arg(long = "sample-column")]
+        sample_column: Option<String>,
+
+        /// Replace a sample (or the ClinVar release) that is already stored
+        #[arg(long)]
+        replace: bool,
+
+        /// Ingest the file as a ClinVar release even without an INFO/CLNSIG header
+        #[arg(long)]
+        clinvar: bool,
     },
 
     /// Query variants from a GenoLance store
@@ -286,8 +299,20 @@ async fn main() -> Result<()> {
             store,
             files,
             sample,
+            sample_column,
+            replace,
+            clinvar,
         } => {
-            genolance_variants::ingest::run(&store, &files, sample.as_deref()).await?;
+            let mut opts = genolance_variants::ingest::IngestOptions::new()
+                .with_replace(replace)
+                .with_clinvar(clinvar);
+            if let Some(s) = sample {
+                opts = opts.with_sample_override(s);
+            }
+            if let Some(c) = sample_column {
+                opts = opts.with_sample_column(c);
+            }
+            genolance_variants::ingest::run(&store, &files, &opts).await?;
         }
         Commands::Query {
             store,

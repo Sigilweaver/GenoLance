@@ -20,8 +20,12 @@ sample). It currently supports:
 
 - `genolance ingest` - parse a VCF/BCF and write one Arrow row per
   (sample, chrom, pos, ref, alt). Multi-allelic sites are split.
-  ClinVar VCFs are auto-detected by filename and go into a separate
-  `clinvar` table.
+  A VCF with no sample columns and an INFO/CLNSIG header (or any file
+  given `--clinvar`) goes into a separate `clinvar` table; a second
+  ClinVar release needs `--replace`. Multi-sample VCFs need
+  `--sample-column <name>`. A sample that is already stored needs
+  `--replace`. Truncated files, malformed genotypes and mismatched
+  allele counts are errors, and a failed ingest leaves no rows behind.
 - `genolance query` - region queries (`--chrom --start --end`) plus
   gene lookups that resolve gene → positions via ClinVar before
   filtering the variants table.
@@ -72,7 +76,7 @@ rm -rf $STORE
 # Match the ClinVar assembly to your sample VCFs (GRCh37 vs GRCh38).
 genolance ingest -s $STORE --sample sampleA path/to/sampleA.vcf.gz
 genolance ingest -s $STORE --sample sampleB path/to/sampleB.vcf.gz
-genolance ingest -s $STORE path/to/clinvar.vcf.gz
+genolance ingest -s $STORE path/to/clinvar.vcf.gz   # needs an INFO/CLNSIG header, or add --clinvar
 
 # Region query
 genolance query -s $STORE --chrom chr17 --start 43044000 --end 43125000

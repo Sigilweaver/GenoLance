@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behavior changes
+
+- `genolance ingest` now returns an error instead of storing a wrong or
+  partial result when:
+  - a `.gz`/`.bgz` file lacks the BGZF end-of-file block, or the last line
+    has no newline (truncated file); a plain-gzip file (not BGZF) and a file
+    that is not gzip at all get their own messages;
+  - a record has fewer or more sample columns than the header, or lists a
+    FORMAT key twice;
+  - a genotype is malformed or names an allele beyond the ALT list, a FORMAT
+    or INFO array element does not parse, QUAL does not parse, the ALT list
+    mixes `.`/empty alleles with real ones, or INFO/AF does not match its
+    declared Number and the ALT count;
+  - the sample is already stored (use `--replace`), `--sample` is given with
+    more than one file, or the VCF has more than one sample column (use
+    `--sample-column`);
+  - the ClinVar table already holds a release (use `--replace`), or a
+    sites-only VCF has no INFO/CLNSIG header (use `--clinvar`).
+- ClinVar is recognised by its INFO/CLNSIG header, not by "clinvar" in the
+  filename.
+- A failed ingest removes the rows it wrote. A sample is registered only
+  after its file was read completely.
+- INFO and FORMAT values are stored as written in the file: percent-encoded
+  text, `;` inside FORMAT strings, float precision, and `K=.` round-trip
+  through `export` unchanged. Float-typed or negative DP/GQ are kept in
+  `format_extra` instead of being dropped. `format_extra` values now escape
+  `%`, `;` and `=` as `%25`, `%3B`, `%3D`.
+- Records with POS 0 or ALT `.` are still skipped, and the ingest summary now
+  prints how many.
+
+### API breaks
+
+- `ingest::run` takes `&IngestOptions` instead of `Option<&str>` and returns
+  an `IngestReport` (skipped-record counts). Added `IngestOptions`,
+  `IngestReport` and `genolance_core::Error` (all `#[non_exhaustive]`);
+  rejected input surfaces as `genolance_core::Error` inside the
+  `anyhow::Error`.
+
 ### Security
 
 - Updated the transitive TLS dependencies to rustls 0.23.45 and
