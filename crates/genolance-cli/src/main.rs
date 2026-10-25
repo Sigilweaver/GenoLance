@@ -64,7 +64,7 @@ enum Commands {
         #[arg(long)]
         end: Option<u64>,
 
-        /// Output format: table | json | arrow
+        /// Output format: table | json
         #[arg(long, default_value = "table", value_parser = clap::value_parser!(genolance_variants::query::OutputFormat))]
         output: genolance_variants::query::OutputFormat,
     },
@@ -75,9 +75,11 @@ enum Commands {
         #[arg(short, long)]
         store: String,
 
-        /// Annotation VCF/BCF to join against (e.g. clinvar.vcf.gz)
+        /// ClinVar VCF to load when the store has no ClinVar table yet. Not
+        /// allowed when the store already holds a release (use
+        /// `ingest --replace` to load a new one).
         #[arg(long)]
-        against: String,
+        against: Option<String>,
 
         /// Filter by clinical_significance as a case-insensitive substring
         /// (e.g. "pathogenic" also matches "Likely_pathogenic" and "Conflicting...").
@@ -390,7 +392,7 @@ async fn main() -> Result<()> {
                 .map(genolance_core::gene_lists::parse_gene_list);
             f.include_filtered = include_filtered;
             f.keep_missing = keep_missing;
-            genolance_variants::join::run(&store, &against, &f).await?;
+            genolance_variants::join::run(&store, against.as_deref(), &f).await?;
         }
         Commands::Screen {
             store,

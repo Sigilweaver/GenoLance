@@ -27,8 +27,8 @@ use genolance_core::store::Store;
 use genolance_core::Error;
 
 use crate::common::{
-    carrier_state, chrom_predicate, normalize_chrom, opt_string, req_str, req_u64, sql_escape,
-    Carrier,
+    carrier_state, chrom_predicate, normalize_chrom, opt_string, req_str, req_u64, require_samples,
+    sql_escape, Carrier,
 };
 
 type Key = (String, u64, String, String);
@@ -54,6 +54,36 @@ pub async fn run(
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!("store has no '{VARIANTS_TABLE}' table"));
+    }
+
+    require_samples(&store, std::slice::from_ref(&sample_name.to_string())).await?;
+
+    // Open the annotation file first: a truncated or wrongly compressed file,
+    // or an --info key it does not declare, must fail before any output.
+    let (mut reader, tail) = crate::ingest::open_vcf_reader(annotation_vcf)
+        .with_context(|| format!("opening {annotation_vcf}"))?;
+    let header = reader
+        .read_header()
+        .with_context(|| format!("reading header of {annotation_vcf}"))?;
+    let undeclared: Vec<&String> = info_fields
+        .iter()
+        .filter(|f| !header.infos().contains_key(f.as_str()))
+        .collect();
+    if !undeclared.is_empty() {
+        return Err(anyhow!(
+            "{annotation_vcf} does not declare INFO key(s) {}; declared keys: {}",
+            undeclared
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            header
+                .infos()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     // 1. Pull sample variants for the region.
@@ -92,12 +122,6 @@ pub async fn run(
     }
 
     // 2. Stream the annotation VCF, emit matched rows with requested INFO fields.
-    let mut reader = vcf::io::reader::Builder::default()
-        .build_from_path(annotation_vcf)
-        .with_context(|| format!("opening {annotation_vcf}"))?;
-    let header = reader
-        .read_header()
-        .with_context(|| format!("reading header of {annotation_vcf}"))?;
 
     // Print column header.
     let mut hdr = vec![
@@ -173,6 +197,7 @@ pub async fn run(
             matched += 1;
         }
     }
+    tail.check_complete(annotation_vcf)?;
     eprintln!("[annotate] {matched} annotated variants emitted");
     Ok(())
 }

@@ -22,20 +22,41 @@ type Key = (String, u64, String, String);
 /// and optionally by gene set (ACMG SF v3 or user-supplied). Calls whose
 /// FILTER is not PASS, and calls with a missing QUAL/DP when a minimum is
 /// set, are excluded and counted unless `Filters` says otherwise.
-pub async fn run(store_path: &str, annotation_vcf: &str, f: &Filters) -> Result<()> {
+///
+/// `annotation_vcf` is only used to load ClinVar when the store has none. If
+/// the store already holds a release, passing a file is an error: the stored
+/// release is what the join uses, and a different file would be silently
+/// ignored. Load a new release with `genolance ingest --replace`.
+pub async fn run(store_path: &str, annotation_vcf: Option<&str>, f: &Filters) -> Result<()> {
     validate_filters(f)?;
     let store = Store::open(store_path).await?;
 
     // Make sure the ClinVar table exists - ingest it on demand if missing.
     let tables = store.variants.table_names().execute().await?;
-    if !tables.iter().any(|n| n == CLINVAR_TABLE) {
-        println!("[join] '{CLINVAR_TABLE}' table not found; ingesting {annotation_vcf} ...");
-        crate::ingest::run(
-            store_path,
-            std::slice::from_ref(&annotation_vcf.to_string()),
-            &crate::ingest::IngestOptions::new().with_clinvar(true),
-        )
-        .await?;
+    let have_clinvar = tables.iter().any(|n| n == CLINVAR_TABLE);
+    match (have_clinvar, annotation_vcf) {
+        (true, Some(file)) => {
+            return Err(anyhow!(
+                "the store already holds a ClinVar release, so `join` would ignore {file}; \
+                 drop --against to use the stored release, or load the file with \
+                 `genolance ingest --replace {file}`"
+            ));
+        }
+        (false, None) => {
+            return Err(anyhow!(
+                "the store has no '{CLINVAR_TABLE}' table; pass --against <clinvar.vcf.gz> or run `genolance ingest` on it first"
+            ));
+        }
+        (false, Some(file)) => {
+            println!("[join] '{CLINVAR_TABLE}' table not found; ingesting {file} ...");
+            crate::ingest::run(
+                store_path,
+                std::slice::from_ref(&file.to_string()),
+                &crate::ingest::IngestOptions::new().with_clinvar(true),
+            )
+            .await?;
+        }
+        (true, None) => {}
     }
     if !tables.iter().any(|n| n == VARIANTS_TABLE)
         && !store

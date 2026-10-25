@@ -4,10 +4,11 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
-use arrow_array::{Float32Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
+use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
 use futures::TryStreamExt;
 use genolance_core::gene_lists::{gene_in_set, ACMG_SF_V3};
-use genolance_core::schema::CLINVAR_TABLE;
+use genolance_core::schema::{CLINVAR_TABLE, SAMPLES_TABLE};
+use genolance_core::store::Store;
 use genolance_core::Error;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
@@ -90,6 +91,33 @@ pub(crate) fn carrier_state(gt: Option<&str>) -> Carrier {
     } else {
         Carrier::NoCall
     }
+}
+
+/// Fail with `Error::UnknownSample` unless every name is in the `samples`
+/// registry.
+pub(crate) async fn require_samples(store: &Store, names: &[String]) -> Result<()> {
+    let root_tables = store.conn.table_names().execute().await?;
+    let mut available: Vec<String> = Vec::new();
+    if root_tables.iter().any(|n| n == SAMPLES_TABLE) {
+        let samples = store.conn.open_table(SAMPLES_TABLE).execute().await?;
+        let batches: Vec<RecordBatch> = samples.query().execute().await?.try_collect().await?;
+        for b in &batches {
+            let col = req_str(b, SAMPLES_TABLE, "sample_name")?;
+            for i in 0..col.len() {
+                available.push(col.value(i).to_string());
+            }
+        }
+    }
+    for n in names {
+        if !available.iter().any(|a| a == n) {
+            return Err(Error::UnknownSample {
+                name: n.clone(),
+                available,
+            }
+            .into());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn fmt_qual(q: Option<f32>) -> String {
@@ -283,6 +311,15 @@ pub(crate) fn validate_filters(f: &Filters) -> Result<()> {
             )
             .into());
         }
+    }
+    if f.significance_substring
+        .as_deref()
+        .is_some_and(|s| s.trim().is_empty())
+    {
+        return Err(Error::InvalidArgument(
+            "--significance is empty; an empty substring would match every record".into(),
+        )
+        .into());
     }
     if let Some(list) = &f.gene_filter {
         if list.is_empty() {

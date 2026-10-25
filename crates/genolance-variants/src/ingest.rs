@@ -312,12 +312,12 @@ async fn prepare_clinvar_table(table: &Table, replace: bool) -> Result<()> {
 
 /// Remembers the last byte handed to the VCF parser, so a file that stops
 /// mid-line is detected after parsing.
-struct TailCheck(Arc<AtomicU16>);
+pub(crate) struct TailCheck(Arc<AtomicU16>);
 
 const NO_BYTE: u16 = 256;
 
 impl TailCheck {
-    fn check_complete(&self, path: &str) -> Result<()> {
+    pub(crate) fn check_complete(&self, path: &str) -> Result<()> {
         match self.0.load(Ordering::SeqCst) {
             b if b == u16::from(b'\n') => Ok(()),
             _ => Err(Error::Truncated {
@@ -374,7 +374,9 @@ impl<R: BufRead> BufRead for TrackingReader<R> {
 /// As of noodles-bgzf 0.48, `MultithreadedReader` decompresses on rayon's
 /// global thread pool rather than a caller-specified worker count; configure
 /// pool size via `rayon::ThreadPoolBuilder` at the process level if needed.
-fn open_vcf_reader(path: &str) -> Result<(vcf::io::Reader<Box<dyn BufRead + Send>>, TailCheck)> {
+pub(crate) fn open_vcf_reader(
+    path: &str,
+) -> Result<(vcf::io::Reader<Box<dyn BufRead + Send>>, TailCheck)> {
     let is_bgzf = path.ends_with(".gz") || path.ends_with(".bgz") || path.ends_with(".bcf");
     let mut file = File::open(path).with_context(|| format!("open {path}"))?;
     let last = Arc::new(AtomicU16::new(NO_BYTE));

@@ -2218,6 +2218,7 @@ dependencies = [
  "lancedb",
  "noodles",
  "rayon",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

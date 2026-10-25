@@ -82,8 +82,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value for the ALT; others print all values), errors on a wrong value count or
   an unparsable element, and scans the whole annotation file instead of
   stopping at the first record past `--end`.
-- `query --output` accepts only `table`, `json` or `arrow`; anything else is a
-  usage error.
+- `query --output` accepts only `table` or `json`; anything else is a usage
+  error. JSON is one correctly escaped object per line with `null` for a
+  missing genotype (it used to break on quotes and print `""` for null).
+  `--output arrow` is removed: it printed a summary, not Arrow.
+- `query --gene` matches case-insensitively and fails when ClinVar has no rows
+  for the symbol (it used to print "no positions matched" and exit 0).
+- `join` never ignores the file it is given: with a ClinVar release already in
+  the store, `--against FILE` is an error that points at `ingest --replace`;
+  without `--against` and without a release it is an error too.
+- `annotate` checks its annotation file for truncation and compression like
+  `ingest`, fails for an unregistered sample, and fails for an `--info` key the
+  annotation header does not declare. `compare` fails for an unregistered
+  sample or an unknown `--mode` before reading data. An empty `--significance`
+  is an error.
 
 ### API breaks
 
@@ -95,7 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `join::Filters`, `screen::Filters` and `compound::Filters` are one
   `filters::Filters` (`#[non_exhaustive]`, new `include_filtered` and
   `keep_missing`). `pgx::run` takes a `&Filters`. `query::run` takes an
-  `OutputFormat` instead of a string.
+  `OutputFormat` instead of a string; `join::run` takes the ClinVar file as an
+  `Option`.
 
 ### Security
 

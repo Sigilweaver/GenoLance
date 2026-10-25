@@ -16,6 +16,8 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 
 use genolance_core::schema::{SAMPLES_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
+
+use crate::common::{chrom_predicate, normalize_chrom, require_samples};
 use genolance_core::Error;
 
 /// Run `genolance export`.
@@ -145,34 +147,6 @@ async fn load_sample_header(store: &Store, sample_name: &str) -> Result<Option<S
         }
     }
     Ok(None)
-}
-
-/// Fail with `Error::UnknownSample` unless every name is in the `samples`
-/// registry.
-async fn require_samples(store: &Store, names: &[String]) -> Result<()> {
-    let root_tables = store.conn.table_names().execute().await?;
-    let mut available: Vec<String> = Vec::new();
-    if root_tables.iter().any(|n| n == SAMPLES_TABLE) {
-        let samples = store.conn.open_table(SAMPLES_TABLE).execute().await?;
-        let batches: Vec<RecordBatch> = samples.query().execute().await?.try_collect().await?;
-        for b in &batches {
-            let col = col_str(b, "sample_name")
-                .ok_or_else(|| missing_column("samples", "sample_name"))?;
-            for i in 0..col.len() {
-                available.push(col.value(i).to_string());
-            }
-        }
-    }
-    for n in names {
-        if !available.iter().any(|a| a == n) {
-            return Err(Error::UnknownSample {
-                name: n.clone(),
-                available,
-            }
-            .into());
-        }
-    }
-    Ok(())
 }
 
 fn missing_column(table: &str, column: &str) -> anyhow::Error {
@@ -559,32 +533,6 @@ fn f32_opt(a: Option<&Float32Array>, i: usize) -> Option<f32> {
     } else {
         Some(arr.value(i))
     }
-}
-
-/// Canonical chromosome key: `chr` prefix stripped, `M` folded into `MT`.
-fn normalize_chrom(c: &str) -> String {
-    let bare = c.strip_prefix("chr").unwrap_or(c);
-    if bare == "M" {
-        "MT".to_string()
-    } else {
-        bare.to_string()
-    }
-}
-
-/// SQL predicate matching a chromosome in any common spelling.
-fn chrom_predicate(c: &str) -> String {
-    let norm = normalize_chrom(c);
-    let bases: Vec<&str> = if norm == "MT" {
-        vec!["MT", "M"]
-    } else {
-        vec![norm.as_str()]
-    };
-    let ors: Vec<String> = bases
-        .iter()
-        .flat_map(|b| [b.to_string(), format!("chr{b}")])
-        .map(|f| format!("chrom = '{}'", sql_escape(&f)))
-        .collect();
-    format!("({})", ors.join(" OR "))
 }
 
 fn region_text(chrom: Option<&str>, start: Option<u64>, end: Option<u64>) -> String {

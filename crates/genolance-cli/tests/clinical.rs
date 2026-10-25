@@ -107,7 +107,7 @@ fn join_skips_no_calls_excludes_filtered_and_prints_missing_as_dot() {
             "1\t300\t3\tG\tA\t.\t.\tCLNSIG=Pathogenic;GENEINFO=GENE3:3",
         ],
     );
-    let (out, err) = ok(&["join", "-s", &t.store(), "--against", &t.path("cv.vcf")]);
+    let (out, err) = ok(&["join", "-s", &t.store()]);
     assert!(out.contains("GENE1"), "carrier listed:\n{out}");
     assert!(!out.contains("GENE2"), "no-call must not be listed:\n{out}");
     assert!(
@@ -123,14 +123,7 @@ fn join_skips_no_calls_excludes_filtered_and_prints_missing_as_dot() {
     assert!(err.contains("FILTER is not PASS"), "{err}");
     assert!(err.contains("no-call"), "{err}");
 
-    let (out, _) = ok(&[
-        "join",
-        "-s",
-        &t.store(),
-        "--against",
-        &t.path("cv.vcf"),
-        "--include-filtered",
-    ]);
+    let (out, _) = ok(&["join", "-s", &t.store(), "--include-filtered"]);
     assert!(out.contains("GENE3") && out.contains("LowQual"), "{out}");
 }
 
@@ -140,15 +133,7 @@ fn empty_significance_exact_is_an_error() {
     let t = Tmp::new();
     setup(&t, &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"], &[CV_1]);
     for val in ["", ","] {
-        let err = fails(&[
-            "join",
-            "-s",
-            &t.store(),
-            "--against",
-            &t.path("cv.vcf"),
-            "--significance-exact",
-            val,
-        ]);
+        let err = fails(&["join", "-s", &t.store(), "--significance-exact", val]);
         assert!(err.contains("significance-exact"), "{err}");
     }
 }
@@ -158,23 +143,13 @@ fn empty_significance_exact_is_an_error() {
 fn min_qual_counts_rows_with_missing_qual() {
     let t = Tmp::new();
     setup(&t, &["chr1\t100\t.\tA\tG\t.\tPASS\t.\tGT\t0/1"], &[CV_1]);
-    let (out, err) = ok(&[
-        "join",
-        "-s",
-        &t.store(),
-        "--against",
-        &t.path("cv.vcf"),
-        "--min-qual",
-        "30",
-    ]);
+    let (out, err) = ok(&["join", "-s", &t.store(), "--min-qual", "30"]);
     assert!(!out.contains("GENE1"));
     assert!(err.contains("QUAL or DP is missing"), "{err}");
     let (out, _) = ok(&[
         "join",
         "-s",
         &t.store(),
-        "--against",
-        &t.path("cv.vcf"),
         "--min-qual",
         "30",
         "--keep-missing",
@@ -191,7 +166,7 @@ fn chr_m_matches_clinvar_mt() {
         &["chrM\t3243\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"],
         &["MT\t3243\t9\tA\tG\t.\t.\tCLNSIG=Pathogenic;GENEINFO=MT-TL1:1"],
     );
-    let (out, _) = ok(&["join", "-s", &t.store(), "--against", &t.path("cv.vcf")]);
+    let (out, _) = ok(&["join", "-s", &t.store()]);
     assert!(out.contains("MT-TL1"), "{out}");
 }
 
@@ -343,4 +318,149 @@ chr1\t100\t.\tA\tG,T\t.\t.\tRA=1,2,3;CSQ=x,y;BAD=7,8\n";
     let line = out.lines().find(|l| l.starts_with("1\t100")).unwrap();
     let cols: Vec<&str> = line.split('\t').collect();
     assert_eq!(&cols[3..], &["T", "0/1", "3", "x,y", "8"], "{line}");
+}
+
+// S1: join never silently ignores the file it was given.
+#[test]
+fn join_against_is_not_ignored_when_a_release_is_stored() {
+    let t = Tmp::new();
+    setup(&t, &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"], &[CV_1]);
+    std::fs::write(
+        t.path("new.vcf"),
+        clinvar_vcf(&["1\t100\t1\tA\tG\t.\t.\tCLNSIG=Benign;GENEINFO=GENE1:1"]),
+    )
+    .unwrap();
+    let err = fails(&["join", "-s", &t.store(), "--against", &t.path("new.vcf")]);
+    assert!(err.contains("ingest --replace"), "{err}");
+    // Without --against and without a table there is nothing to join against.
+    let t2 = Tmp::new();
+    std::fs::write(
+        t2.path("s.vcf"),
+        sample_vcf("S1", &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"]),
+    )
+    .unwrap();
+    ok(&["ingest", "-s", &t2.store(), &t2.path("s.vcf")]);
+    let err = fails(&["join", "-s", &t2.store()]);
+    assert!(err.contains("--against"), "{err}");
+    // With a file and no table it ingests the file and joins.
+    std::fs::write(t2.path("cv.vcf"), clinvar_vcf(&[CV_1])).unwrap();
+    let (out, _) = ok(&["join", "-s", &t2.store(), "--against", &t2.path("cv.vcf")]);
+    assert!(out.contains("GENE1"), "{out}");
+}
+
+fn annotation_vcf(lines: &[&str], final_newline: bool) -> String {
+    let mut s = String::from(
+        "##fileformat=VCFv4.2\n##contig=<ID=chr1,length=100000>\n\
+##INFO=<ID=AF,Number=A,Type=Float,Description=\"af\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+    );
+    s.push_str(&lines.join("\n"));
+    if final_newline {
+        s.push('\n');
+    }
+    s
+}
+
+// S3: annotate checks the same things as the other commands.
+#[test]
+fn annotate_rejects_truncated_files_unknown_samples_and_undeclared_keys() {
+    let t = Tmp::new();
+    std::fs::write(
+        t.path("s.vcf"),
+        sample_vcf("S1", &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"]),
+    )
+    .unwrap();
+    ok(&["ingest", "-s", &t.store(), &t.path("s.vcf")]);
+    let line = "chr1\t100\t.\tA\tG\t.\t.\tAF=0.25";
+    std::fs::write(t.path("full.vcf"), annotation_vcf(&[line], true)).unwrap();
+    std::fs::write(t.path("cut.vcf"), annotation_vcf(&[line], false)).unwrap();
+    let base = |vcf: String, sample: &str, info: &str| {
+        let args = [
+            "annotate",
+            "-s",
+            &t.store(),
+            "--sample",
+            sample,
+            "--vcf",
+            &vcf,
+            "--info",
+            info,
+        ];
+        gl(&args)
+    };
+    let o = base(t.path("full.vcf"), "S1", "AF");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let o = base(t.path("cut.vcf"), "S1", "AF");
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("truncated"));
+    let o = base(t.path("full.vcf"), "Typo", "AF");
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("not found"));
+    let o = base(t.path("full.vcf"), "S1", "AFX");
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("does not declare"));
+}
+
+// S4
+#[test]
+fn compare_rejects_unknown_samples_and_modes() {
+    let t = Tmp::new();
+    for (n, name) in [("a", "A"), ("b", "B")] {
+        std::fs::write(
+            t.path(&format!("{n}.vcf")),
+            sample_vcf(name, &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"]),
+        )
+        .unwrap();
+        ok(&["ingest", "-s", &t.store(), &t.path(&format!("{n}.vcf"))]);
+    }
+    let err = fails(&["compare", "-s", &t.store(), "A", "Typo"]);
+    assert!(err.contains("not found"), "{err}");
+    let err = fails(&["compare", "-s", &t.store(), "A", "B", "--mode", "nope"]);
+    assert!(err.contains("unknown compare mode"), "{err}");
+}
+
+// S6, S7
+#[test]
+fn query_gene_is_case_insensitive_json_is_valid_and_arrow_is_gone() {
+    let t = Tmp::new();
+    setup(
+        &t,
+        &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"],
+        &["1\t100\t1\tA\tG\t.\t.\tCLNSIG=Pathogenic;GENEINFO=C1orf112:1"],
+    );
+    let (out, _) = ok(&["query", "-s", &t.store(), "--gene", "c1ORF112"]);
+    assert!(out.contains("1 rows"), "{out}");
+    let err = fails(&["query", "-s", &t.store(), "--gene", "NOPE1"]);
+    assert!(err.contains("no ClinVar rows"), "{err}");
+    let o = gl(&["query", "-s", &t.store(), "--output", "arrow"]);
+    assert_eq!(o.status.code(), Some(2));
+
+    // JSON escaping: a sample name with a quote and a backslash.
+    let t2 = Tmp::new();
+    std::fs::write(
+        t2.path("s.vcf"),
+        sample_vcf("S1", &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t./."]),
+    )
+    .unwrap();
+    ok(&[
+        "ingest",
+        "-s",
+        &t2.store(),
+        "--sample",
+        "s\"Q\\x",
+        &t2.path("s.vcf"),
+    ]);
+    let (out, _) = ok(&["query", "-s", &t2.store(), "--output", "json"]);
+    let line = out.lines().next().unwrap();
+    assert!(line.contains(r#""sample":"s\"Q\\x""#), "{line}");
+    assert!(line.contains(r#""gt":"./.""#), "{line}");
+}
+
+// S14: an empty --significance would match everything
+#[test]
+fn empty_significance_substring_is_an_error() {
+    let t = Tmp::new();
+    setup(&t, &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"], &[CV_1]);
+    let err = fails(&["join", "-s", &t.store(), "--significance", ""]);
+    assert!(err.contains("--significance is empty"), "{err}");
 }

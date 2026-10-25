@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
+use arrow_array::{Array, RecordBatch, StringArray, UInt64Array};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
@@ -7,7 +7,9 @@ use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
 use genolance_core::Error;
 
-use crate::common::{chrom_forms, chrom_predicate};
+use crate::common::{
+    chrom_forms, chrom_predicate, fmt_dp, fmt_qual, opt_string, req_f32, req_str, req_u32, req_u64,
+};
 
 /// Output format of `genolance query`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -16,10 +18,8 @@ pub enum OutputFormat {
     /// Human-readable table (first 100 rows).
     #[default]
     Table,
-    /// One JSON object per row.
+    /// One JSON object per line (NDJSON), one per row.
     Json,
-    /// Arrow schema and batch summary.
-    Arrow,
 }
 
 impl std::str::FromStr for OutputFormat {
@@ -28,9 +28,8 @@ impl std::str::FromStr for OutputFormat {
         match s {
             "table" => Ok(Self::Table),
             "json" => Ok(Self::Json),
-            "arrow" => Ok(Self::Arrow),
             other => Err(Error::InvalidArgument(format!(
-                "unknown output format '{other}'; expected table, json or arrow"
+                "unknown output format '{other}'; expected table or json"
             ))),
         }
     }
@@ -82,15 +81,19 @@ pub async fn run(
         let cv = store.variants.open_table(CLINVAR_TABLE).execute().await?;
         let stream = cv
             .query()
-            .only_if(format!("gene_symbol = '{}'", sql_escape(g)))
+            .only_if(format!(
+                "lower(gene_symbol) = '{}'",
+                sql_escape(&g.to_lowercase())
+            ))
             .select(Select::columns(&["chrom", "pos"]))
             .execute()
             .await?;
         let batches: Vec<RecordBatch> = stream.try_collect().await?;
         let positions = collect_chrom_pos(&batches);
         if positions.is_empty() {
-            println!("(no ClinVar positions matched gene {g})");
-            return Ok(());
+            return Err(anyhow!(
+                "no ClinVar rows for gene '{g}' (symbols match case-insensitively); check the spelling"
+            ));
         }
         predicates.push(region_predicate(&positions));
     }
@@ -104,8 +107,7 @@ pub async fn run(
 
     match output_format {
         OutputFormat::Json => print_json(&batches)?,
-        OutputFormat::Arrow => print_arrow(&batches),
-        OutputFormat::Table => print_table(&batches),
+        OutputFormat::Table => print_table(&batches)?,
     }
     Ok(())
 }
@@ -167,7 +169,7 @@ fn region_predicate(positions: &[(String, u64)]) -> String {
 // Output formatting
 // ---------------------------------------------------------------------------
 
-fn print_table(batches: &[RecordBatch]) {
+fn print_table(batches: &[RecordBatch]) -> Result<()> {
     let mut total = 0usize;
     println!(
         "{:<16} {:<8} {:<12} {:<6} {:<6} {:<8} {:<10} {:<6}",
@@ -175,14 +177,15 @@ fn print_table(batches: &[RecordBatch]) {
     );
     println!("{}", "-".repeat(80));
     for b in batches {
-        let sample = col_str(b, "sample_name");
-        let chrom = col_str(b, "chrom");
-        let pos = col_u64(b, "pos");
-        let ref_a = col_str(b, "ref_allele");
-        let alt_a = col_str(b, "alt_allele");
-        let qual = col_f32(b, "quality");
-        let gt = col_str(b, "genotype");
-        let dp = col_u32(b, "read_depth");
+        let t = VARIANTS_TABLE;
+        let sample = req_str(b, t, "sample_name")?;
+        let chrom = req_str(b, t, "chrom")?;
+        let pos = req_u64(b, t, "pos")?;
+        let ref_a = req_str(b, t, "ref_allele")?;
+        let alt_a = req_str(b, t, "alt_allele")?;
+        let qual = req_f32(b, t, "quality")?;
+        let gt = req_str(b, t, "genotype")?;
+        let dp = req_u32(b, t, "read_depth")?;
 
         for i in 0..b.num_rows() {
             total += 1;
@@ -191,16 +194,14 @@ fn print_table(batches: &[RecordBatch]) {
             }
             println!(
                 "{:<16} {:<8} {:<12} {:<6} {:<6} {:<8} {:<10} {:<6}",
-                sample.as_ref().map(|a| a.value(i)).unwrap_or(""),
-                chrom.as_ref().map(|a| a.value(i)).unwrap_or(""),
-                pos.as_ref()
-                    .map(|a| a.value(i).to_string())
-                    .unwrap_or_default(),
-                truncate(ref_a.as_ref().map(|a| a.value(i)).unwrap_or(""), 6),
-                truncate(alt_a.as_ref().map(|a| a.value(i)).unwrap_or(""), 6),
-                fmt_opt_f32(qual.as_ref(), i),
-                gt.as_ref().map(|a| a.value(i)).unwrap_or(""),
-                fmt_opt_u32(dp.as_ref(), i),
+                sample.value(i),
+                chrom.value(i),
+                pos.value(i),
+                truncate(ref_a.value(i), 6),
+                truncate(alt_a.value(i), 6),
+                fmt_qual((!qual.is_null(i)).then(|| qual.value(i))),
+                opt_string(gt, i).unwrap_or_else(|| ".".into()),
+                fmt_dp((!dp.is_null(i)).then(|| dp.value(i))),
             );
         }
     }
@@ -210,78 +211,38 @@ fn print_table(batches: &[RecordBatch]) {
     } else {
         println!("{total} rows");
     }
+    Ok(())
 }
 
+/// One JSON object per row, properly escaped; a missing genotype is `null`.
 fn print_json(batches: &[RecordBatch]) -> Result<()> {
     for b in batches {
-        let sample = col_str(b, "sample_name");
-        let chrom = col_str(b, "chrom");
-        let pos = col_u64(b, "pos");
-        let ref_a = col_str(b, "ref_allele");
-        let alt_a = col_str(b, "alt_allele");
-        let gt = col_str(b, "genotype");
+        let t = VARIANTS_TABLE;
+        let sample = req_str(b, t, "sample_name")?;
+        let chrom = req_str(b, t, "chrom")?;
+        let pos = req_u64(b, t, "pos")?;
+        let ref_a = req_str(b, t, "ref_allele")?;
+        let alt_a = req_str(b, t, "alt_allele")?;
+        let gt = req_str(b, t, "genotype")?;
         for i in 0..b.num_rows() {
-            println!(
-                "{{\"sample\":\"{}\",\"chrom\":\"{}\",\"pos\":{},\"ref\":\"{}\",\"alt\":\"{}\",\"gt\":\"{}\"}}",
-                sample.as_ref().map(|a| a.value(i)).unwrap_or(""),
-                chrom.as_ref().map(|a| a.value(i)).unwrap_or(""),
-                pos.as_ref().map(|a| a.value(i)).unwrap_or(0),
-                ref_a.as_ref().map(|a| a.value(i)).unwrap_or(""),
-                alt_a.as_ref().map(|a| a.value(i)).unwrap_or(""),
-                gt.as_ref().map(|a| a.value(i)).unwrap_or(""),
-            );
+            let row = serde_json::json!({
+                "sample": sample.value(i),
+                "chrom": chrom.value(i),
+                "pos": pos.value(i),
+                "ref": ref_a.value(i),
+                "alt": alt_a.value(i),
+                "gt": opt_string(gt, i),
+            });
+            println!("{row}");
         }
     }
     Ok(())
 }
 
-fn print_arrow(batches: &[RecordBatch]) {
-    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    let cols = batches.first().map(|b| b.num_columns()).unwrap_or(0);
-    println!(
-        "Arrow RecordBatches: {} ({} rows x {} cols)",
-        batches.len(),
-        rows,
-        cols
-    );
-    if let Some(first) = batches.first() {
-        println!("schema: {}", first.schema());
-    }
-}
-
-fn col_str<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a StringArray> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-}
-fn col_u64<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a UInt64Array> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
-}
-fn col_u32<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a UInt32Array> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
-}
-fn col_f32<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a Float32Array> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-}
-
-fn fmt_opt_f32(a: Option<&&Float32Array>, i: usize) -> String {
-    match a {
-        Some(arr) if !arr.is_null(i) => format!("{:.1}", arr.value(i)),
-        _ => String::from("."),
-    }
-}
-fn fmt_opt_u32(a: Option<&&UInt32Array>, i: usize) -> String {
-    match a {
-        Some(arr) if !arr.is_null(i) => arr.value(i).to_string(),
-        _ => String::from("."),
-    }
-}
-
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() > n {
-        format!("{}...", &s[..n.saturating_sub(1)])
+    if s.chars().count() > n {
+        let cut: String = s.chars().take(n.saturating_sub(1)).collect();
+        format!("{cut}...")
     } else {
         s.to_string()
     }

@@ -8,7 +8,7 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 use genolance_core::schema::VARIANTS_TABLE;
 use genolance_core::store::Store;
 
-use crate::common::{carrier_state, opt_string, req_str, req_u64, Carrier};
+use crate::common::{carrier_state, opt_string, req_str, req_u64, require_samples, Carrier};
 
 type Key = (String, u64, String, String);
 
@@ -17,8 +17,14 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
     if samples.len() < 2 {
         return Err(anyhow!("compare needs at least 2 samples"));
     }
+    if !matches!(mode, "concordance" | "carrier-screen" | "private") {
+        return Err(anyhow!(
+            "unknown compare mode: {mode} (expected concordance, carrier-screen or private)"
+        ));
+    }
 
     let store = Store::open(store_path).await?;
+    require_samples(&store, samples).await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!(

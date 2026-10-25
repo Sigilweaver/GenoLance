@@ -48,7 +48,7 @@ chr1\t100\t1\tA\tG\t.\t.\tCLNSIG=Pathogenic\n";
     .unwrap();
     table.add(vec![batch]).execute().await.unwrap();
 
-    let e = genolance_variants::join::run(&t.store(), &t.path("cv.vcf"), &Filters::default())
+    let e = genolance_variants::join::run(&t.store(), None, &Filters::default())
         .await
         .unwrap_err();
     assert!(format!("{e:#}").contains("more than one release"), "{e:#}");
