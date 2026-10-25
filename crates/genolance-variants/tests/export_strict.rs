@@ -37,19 +37,16 @@ async fn multiallelic_record_roundtrips_as_one_line() {
     assert_eq!(lines, vec![l.to_string()]);
 }
 
-// S1-1: rows that cannot be attributed to records are an error.
+// S1-1: two multi-allelic records with the same shape at one position are
+// told apart by their source ordinal.
 #[tokio::test]
-async fn ambiguous_multiallelic_rows_are_an_error() {
+async fn same_shape_multiallelic_records_stay_separate() {
     let t = Tmp::new();
     let l1 = "chr1\t200\t.\tA\tG,T\t50\tPASS\t.\tGT\t0/1";
     let l2 = "chr1\t200\t.\tA\tG,T\t60\tPASS\t.\tGT\t0/2";
     ingest_text(&t, "a.vcf", &vcf("S1", &[l1, l2])).await;
-    let out = t.0.join("out.vcf");
-    let e = export::run(&t.store(), "S1", None, None, None, out.to_str())
-        .await
-        .unwrap_err();
-    assert!(matches!(ingest_error(&e), Error::MalformedRecord { .. }));
-    assert!(!out.exists(), "no partial output on error");
+    let lines = export_lines(&t.store(), "S1", &t.0.join("out.vcf")).await;
+    assert_eq!(lines, vec![l1.to_string(), l2.to_string()]);
 }
 
 // S1-17: the #CHROM line names the exported sample.

@@ -18,9 +18,9 @@ use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
 
 use crate::common::{
-    build_clinvar_map, carrier_state, ensure_clinvar_unique, fmt_dp, fmt_qual, normalize_chrom,
-    opt_string, req_f32, req_str, req_u32, req_u64, significance_predicate, sql_escape, truncate,
-    validate_filters, Carrier, Gate, Key,
+    build_clinvar_map, carrier_state, check_reference, ensure_clinvar_unique, fmt_dp, fmt_qual,
+    normalize_chrom, opt_string, req_f32, req_str, req_u32, req_u64, significance_predicate,
+    sql_escape, truncate, validate_filters, Carrier, Gate, Key,
 };
 pub use crate::filters::Filters;
 
@@ -54,6 +54,13 @@ pub async fn run(store_path: &str, sample: &str, f: &Filters) -> Result<()> {
     // 1. Build ClinVar lookup with the requested filter.
     let clinvar = store.variants.open_table(CLINVAR_TABLE).execute().await?;
     ensure_clinvar_unique(&clinvar).await?;
+    check_reference(
+        &store,
+        Some(std::slice::from_ref(&sample.to_string())),
+        f,
+        "compound-het",
+    )
+    .await?;
     let cv_pred = build_clinvar_predicate(f)?;
     let cv_batches: Vec<RecordBatch> = clinvar
         .query()
@@ -98,6 +105,9 @@ pub async fn run(store_path: &str, sample: &str, f: &Filters) -> Result<()> {
         let pos = req_u64(b, t, "pos")?;
         let ref_a = req_str(b, t, "ref_allele")?;
         let alt_a = req_str(b, t, "alt_allele")?;
+        let npos = req_u64(b, t, "norm_pos")?;
+        let nref = req_str(b, t, "norm_ref")?;
+        let nalt = req_str(b, t, "norm_alt")?;
         let gt = req_str(b, t, "genotype")?;
         let qual = req_f32(b, t, "quality")?;
         let dp = req_u32(b, t, "read_depth")?;
@@ -105,9 +115,9 @@ pub async fn run(store_path: &str, sample: &str, f: &Filters) -> Result<()> {
         for i in 0..b.num_rows() {
             let key: Key = (
                 normalize_chrom(chrom.value(i)),
-                pos.value(i),
-                ref_a.value(i).to_string(),
-                alt_a.value(i).to_string(),
+                npos.value(i),
+                nref.value(i).to_string(),
+                nalt.value(i).to_string(),
             );
             let Some(ann) = cv_map.get(&key) else {
                 continue;
@@ -127,21 +137,23 @@ pub async fn run(store_path: &str, sample: &str, f: &Filters) -> Result<()> {
             if !gate.admit(fl.as_deref(), q, d) {
                 continue;
             }
-            let Some(gene) = ann.gene_symbol.clone() else {
+            if ann.genes.is_empty() {
                 no_gene += 1;
                 continue;
-            };
-            by_gene.entry(gene).or_default().push(Hit {
-                chrom: chrom.value(i).to_string(),
-                pos: pos.value(i),
-                ref_allele: ref_a.value(i).to_string(),
-                alt_allele: alt_a.value(i).to_string(),
-                significance: ann.clinical_significance.clone().unwrap_or_default(),
-                disease: ann.disease_name.clone().unwrap_or_default(),
-                gt: gt_s.unwrap_or_default(),
-                qual: q,
-                dp: d,
-            });
+            }
+            for gene in &ann.genes {
+                by_gene.entry(gene.clone()).or_default().push(Hit {
+                    chrom: chrom.value(i).to_string(),
+                    pos: pos.value(i),
+                    ref_allele: ref_a.value(i).to_string(),
+                    alt_allele: alt_a.value(i).to_string(),
+                    significance: ann.clinical_significance.clone().unwrap_or_default(),
+                    disease: ann.disease_name.clone().unwrap_or_default(),
+                    gt: gt_s.clone().unwrap_or_default(),
+                    qual: q,
+                    dp: d,
+                });
+            }
         }
     }
 

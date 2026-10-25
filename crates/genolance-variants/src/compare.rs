@@ -8,7 +8,10 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 use genolance_core::schema::VARIANTS_TABLE;
 use genolance_core::store::Store;
 
-use crate::common::{carrier_state, opt_string, req_str, req_u64, require_samples, Carrier};
+use crate::common::{
+    carrier_state, check_samples_agree, normalize_chrom, opt_string, req_str, req_u64,
+    require_samples, Carrier,
+};
 
 type Key = (String, u64, String, String);
 
@@ -25,6 +28,7 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
 
     let store = Store::open(store_path).await?;
     require_samples(&store, samples).await?;
+    check_samples_agree(&store, samples, "compare").await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(Error::missing_table(VARIANTS_TABLE, "ingest samples first"));
@@ -53,9 +57,9 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
         let t = VARIANTS_TABLE;
         let sample = req_str(b, t, "sample_name")?;
         let chrom = req_str(b, t, "chrom")?;
-        let pos = req_u64(b, t, "pos")?;
-        let ref_a = req_str(b, t, "ref_allele")?;
-        let alt_a = req_str(b, t, "alt_allele")?;
+        let npos = req_u64(b, t, "norm_pos")?;
+        let nref = req_str(b, t, "norm_ref")?;
+        let nalt = req_str(b, t, "norm_alt")?;
         let gt = req_str(b, t, "genotype")?;
         for i in 0..b.num_rows() {
             let s = sample.value(i).to_string();
@@ -69,10 +73,10 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
                 }
             }
             let key: Key = (
-                chrom.value(i).to_string(),
-                pos.value(i),
-                ref_a.value(i).to_string(),
-                alt_a.value(i).to_string(),
+                normalize_chrom(chrom.value(i)),
+                npos.value(i),
+                nref.value(i).to_string(),
+                nalt.value(i).to_string(),
             );
             index
                 .entry(key)

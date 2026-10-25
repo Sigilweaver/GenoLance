@@ -22,8 +22,8 @@ use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
 
 use crate::common::{
-    build_clinvar_map, carrier_state, ensure_clinvar_unique, normalize_chrom, opt_string, req_str,
-    req_u64, sql_escape, Carrier, Gate, Key,
+    build_clinvar_map, carrier_state, check_reference, ensure_clinvar_unique, gene_match_predicate,
+    normalize_chrom, opt_string, req_str, req_u64, sql_escape, Carrier, Gate, Key,
 };
 use crate::filters::Filters;
 
@@ -81,25 +81,29 @@ pub async fn run(
     // 1. Pull ClinVar entries for PGx genes, filtered to drug-response rows.
     let clinvar = store.variants.open_table(CLINVAR_TABLE).execute().await?;
     ensure_clinvar_unique(&clinvar).await?;
+    check_reference(
+        &store,
+        Some(std::slice::from_ref(&sample.to_string())),
+        f,
+        "pgx",
+    )
+    .await?;
     if !requested.is_empty() {
-        let in_list = requested
-            .iter()
-            .map(|g| format!("'{}'", sql_escape(g)))
-            .collect::<Vec<_>>()
-            .join(", ");
         let found: Vec<RecordBatch> = clinvar
             .query()
-            .only_if(format!("gene_symbol IN ({in_list})"))
-            .select(Select::columns(&["gene_symbol"]))
+            .only_if(gene_match_predicate(&requested)?)
+            .select(Select::columns(&["gene_symbols"]))
             .execute()
             .await?
             .try_collect()
             .await?;
         let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
         for b in &found {
-            let col = req_str(b, CLINVAR_TABLE, "gene_symbol")?;
+            let col = crate::common::req_list(b, CLINVAR_TABLE, "gene_symbols")?;
             for i in 0..col.len() {
-                present.insert(col.value(i).to_string());
+                for g in crate::common::list_strings(col, i) {
+                    present.insert(g.to_uppercase());
+                }
             }
         }
         let missing: Vec<&String> = requested.iter().filter(|g| !present.contains(*g)).collect();
@@ -109,11 +113,6 @@ pub async fn run(
             ));
         }
     }
-    let gene_in = genes
-        .iter()
-        .map(|g| format!("'{}'", sql_escape(g)))
-        .collect::<Vec<_>>()
-        .join(", ");
     let needle_pred = PGX_NEEDLES
         .iter()
         .flat_map(|n| {
@@ -125,7 +124,7 @@ pub async fn run(
         })
         .collect::<Vec<_>>()
         .join(" OR ");
-    let pred = format!("gene_symbol IN ({gene_in}) AND ({needle_pred})");
+    let pred = format!("{} AND ({needle_pred})", gene_match_predicate(&genes)?);
     let cv_batches: Vec<RecordBatch> = clinvar
         .query()
         .only_if(pred)
@@ -159,18 +158,18 @@ pub async fn run(
     for b in &v_batches {
         let t = VARIANTS_TABLE;
         let chrom = req_str(b, t, "chrom")?;
-        let pos = req_u64(b, t, "pos")?;
-        let ref_a = req_str(b, t, "ref_allele")?;
-        let alt_a = req_str(b, t, "alt_allele")?;
+        let npos = req_u64(b, t, "norm_pos")?;
+        let nref = req_str(b, t, "norm_ref")?;
+        let nalt = req_str(b, t, "norm_alt")?;
         let gt = req_str(b, t, "genotype")?;
         let filter = req_str(b, t, "filter")?;
         for i in 0..b.num_rows() {
             let gt_str = opt_string(gt, i);
             let key: Key = (
                 normalize_chrom(chrom.value(i)),
-                pos.value(i),
-                ref_a.value(i).to_string(),
-                alt_a.value(i).to_string(),
+                npos.value(i),
+                nref.value(i).to_string(),
+                nalt.value(i).to_string(),
             );
             let Some(ann) = cv_map.get(&key) else {
                 continue;

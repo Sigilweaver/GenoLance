@@ -1,15 +1,17 @@
 use arrow_array::{Array, RecordBatch};
 use futures::TryStreamExt;
-use genolance_core::{Error, Result};
+use genolance_core::{Error, Result, ResultExt};
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
+use genolance_core::schema::{
+    CLINVAR_TABLE, META_CLINVAR_RELEASE, META_CLINVAR_SOURCE, VARIANTS_TABLE,
+};
 use genolance_core::store::Store;
 
 use crate::common::{
-    build_clinvar_map, carrier_state, ensure_clinvar_unique, fmt_dp, fmt_qual, normalize_chrom,
-    opt_string, req_f32, req_str, req_u32, req_u64, significance_predicate, truncate,
-    validate_filters, Carrier, Gate,
+    build_clinvar_map, carrier_state, check_reference, ensure_clinvar_unique, fmt_dp, fmt_qual,
+    normalize_chrom, opt_string, req_f32, req_str, req_u32, req_u64, significance_predicate,
+    truncate, validate_filters, Carrier, Gate,
 };
 pub use crate::filters::Filters;
 
@@ -36,11 +38,28 @@ pub async fn run(store_path: &str, annotation_vcf: Option<&str>, f: &Filters) ->
     let have_clinvar = tables.iter().any(|n| n == CLINVAR_TABLE);
     match (have_clinvar, annotation_vcf) {
         (true, Some(file)) => {
-            return Err(invalid!(
-                "the store already holds a ClinVar release, so `join` would ignore {file}; \
-                 drop --against to use the stored release, or load the file with \
-                 `genolance ingest --replace {file}`"
-            ));
+            // Fine if it is the file already loaded (same name and ##fileDate).
+            let (mut reader, _tail) =
+                crate::ingest::open_vcf_reader(file).with_context(|| format!("opening {file}"))?;
+            let header = reader
+                .read_header()
+                .with_context(|| format!("reading header of {file}"))?;
+            let file_date = crate::ingest::file_date(&header);
+            let name = std::path::Path::new(file)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(file);
+            let stored_source = store.meta(META_CLINVAR_SOURCE).await?;
+            let stored_date = store.meta(META_CLINVAR_RELEASE).await?;
+            if stored_source.as_deref() != Some(name) || stored_date != file_date {
+                return Err(Error::InvalidArgument(format!(
+                    "the store holds ClinVar release {} (from {}), so `join` would ignore {file}; \
+                     drop --against to use the stored release, or load the file with \
+                     `genolance ingest --replace {file}`",
+                    stored_date.as_deref().unwrap_or("with no ##fileDate"),
+                    stored_source.as_deref().unwrap_or("an unknown file"),
+                )));
+            }
         }
         (false, None) => {
             return Err(invalid!(
@@ -76,6 +95,7 @@ pub async fn run(store_path: &str, annotation_vcf: Option<&str>, f: &Filters) ->
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
     let clinvar = store.variants.open_table(CLINVAR_TABLE).execute().await?;
     ensure_clinvar_unique(&clinvar).await?;
+    check_reference(&store, None, f, "join").await?;
 
     // ClinVar predicate: significance-exact OR substring; no filter matches everything.
     let cv_pred = build_clinvar_predicate(f)?;
@@ -134,6 +154,9 @@ pub async fn run(store_path: &str, annotation_vcf: Option<&str>, f: &Filters) ->
         let pos = req_u64(b, t, "pos")?;
         let ref_a = req_str(b, t, "ref_allele")?;
         let alt_a = req_str(b, t, "alt_allele")?;
+        let npos = req_u64(b, t, "norm_pos")?;
+        let nref = req_str(b, t, "norm_ref")?;
+        let nalt = req_str(b, t, "norm_alt")?;
         let gt = req_str(b, t, "genotype")?;
         let qual = req_f32(b, t, "quality")?;
         let dp = req_u32(b, t, "read_depth")?;
@@ -141,9 +164,9 @@ pub async fn run(store_path: &str, annotation_vcf: Option<&str>, f: &Filters) ->
         for i in 0..b.num_rows() {
             let key: Key = (
                 normalize_chrom(chrom.value(i)),
-                pos.value(i),
-                ref_a.value(i).to_string(),
-                alt_a.value(i).to_string(),
+                npos.value(i),
+                nref.value(i).to_string(),
+                nalt.value(i).to_string(),
             );
             let Some(ann) = cv_map.get(&key) else {
                 continue;
@@ -195,49 +218,8 @@ fn build_clinvar_predicate(f: &Filters) -> Result<String> {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
-    use arrow_array::{StringArray, UInt64Array};
-    use arrow_schema::{DataType, Field, Schema};
-    use std::sync::Arc;
 
-    /// Minimal ClinVar-shaped batch covering only the columns `build_clinvar_map` reads.
-    fn clinvar_batch(rows: &[(&str, u64, &str, &str, &str, &str, &str)]) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("chrom", DataType::Utf8, false),
-            Field::new("pos", DataType::UInt64, false),
-            Field::new("ref_allele", DataType::Utf8, false),
-            Field::new("alt_allele", DataType::Utf8, false),
-            Field::new("gene_symbol", DataType::Utf8, true),
-            Field::new("clinical_significance", DataType::Utf8, true),
-            Field::new("disease_name", DataType::Utf8, true),
-        ]));
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
-                )),
-                Arc::new(UInt64Array::from(
-                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.4).collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.5).collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.6).collect::<Vec<_>>(),
-                )),
-            ],
-        )
-        .unwrap()
-    }
+    use crate::common::testutil::clinvar_batch;
 
     #[test]
     fn build_clinvar_predicate_defaults_to_match_all_without_filters() {

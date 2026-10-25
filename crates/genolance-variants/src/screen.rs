@@ -19,9 +19,9 @@ use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
 
 use crate::common::{
-    build_clinvar_map, carrier_state, ensure_clinvar_unique, fmt_dp, fmt_qual, normalize_chrom,
-    opt_string, req_f32, req_str, req_u32, req_u64, significance_predicate, sql_escape, truncate,
-    validate_filters, Annotation, Carrier, Gate, Key,
+    build_clinvar_map, carrier_state, check_reference, ensure_clinvar_unique, fmt_dp, fmt_qual,
+    normalize_chrom, opt_string, req_f32, req_str, req_u32, req_u64, significance_predicate,
+    sql_escape, truncate, validate_filters, Annotation, Carrier, Gate, Key,
 };
 pub use crate::filters::Filters;
 
@@ -55,6 +55,7 @@ pub async fn run(store_path: &str, samples: &[String], f: &Filters) -> Result<()
     // 1. Pull filtered ClinVar into an in-memory map keyed on (chrom, pos, ref, alt).
     let clinvar = store.variants.open_table(CLINVAR_TABLE).execute().await?;
     ensure_clinvar_unique(&clinvar).await?;
+    check_reference(&store, Some(samples), f, "screen").await?;
     let cv_pred = build_clinvar_predicate(f)?;
     let cv_batches: Vec<RecordBatch> = clinvar
         .query()
@@ -104,9 +105,9 @@ pub async fn run(store_path: &str, samples: &[String], f: &Filters) -> Result<()
         let t = VARIANTS_TABLE;
         let sample = req_str(b, t, "sample_name")?;
         let chrom = req_str(b, t, "chrom")?;
-        let pos = req_u64(b, t, "pos")?;
-        let ref_a = req_str(b, t, "ref_allele")?;
-        let alt_a = req_str(b, t, "alt_allele")?;
+        let npos = req_u64(b, t, "norm_pos")?;
+        let nref = req_str(b, t, "norm_ref")?;
+        let nalt = req_str(b, t, "norm_alt")?;
         let gt = req_str(b, t, "genotype")?;
         let qual = req_f32(b, t, "quality")?;
         let dp = req_u32(b, t, "read_depth")?;
@@ -114,9 +115,9 @@ pub async fn run(store_path: &str, samples: &[String], f: &Filters) -> Result<()
         for i in 0..b.num_rows() {
             let key: Key = (
                 normalize_chrom(chrom.value(i)),
-                pos.value(i),
-                ref_a.value(i).to_string(),
-                alt_a.value(i).to_string(),
+                npos.value(i),
+                nref.value(i).to_string(),
+                nalt.value(i).to_string(),
             );
             if !cv_map.contains_key(&key) {
                 continue;
@@ -199,49 +200,8 @@ fn build_clinvar_predicate(f: &Filters) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{StringArray, UInt64Array};
-    use arrow_schema::{DataType, Field, Schema};
-    use std::sync::Arc;
 
-    /// Minimal ClinVar-shaped batch covering only the columns `build_clinvar_map` reads.
-    fn clinvar_batch(rows: &[(&str, u64, &str, &str, &str, &str, &str)]) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("chrom", DataType::Utf8, false),
-            Field::new("pos", DataType::UInt64, false),
-            Field::new("ref_allele", DataType::Utf8, false),
-            Field::new("alt_allele", DataType::Utf8, false),
-            Field::new("gene_symbol", DataType::Utf8, true),
-            Field::new("clinical_significance", DataType::Utf8, true),
-            Field::new("disease_name", DataType::Utf8, true),
-        ]));
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
-                )),
-                Arc::new(UInt64Array::from(
-                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.4).collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.5).collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    rows.iter().map(|r| r.6).collect::<Vec<_>>(),
-                )),
-            ],
-        )
-        .unwrap()
-    }
+    use crate::common::testutil::clinvar_batch;
 
     #[test]
     fn build_clinvar_predicate_defaults_to_pathogenic_substring() {

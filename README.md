@@ -60,9 +60,9 @@ sample). It currently supports:
   optional region filter). **Verified byte-exact roundtrip** (modulo
   float QUAL trailing-zero formatting) on DeepVariant VCFs:
   FORMAT key order, all field values, INFO, multi-allelic grouping all
-  preserved. FORMAT key order is stored per-row via `format_key_order`
-  so the original source order (`GT:GQ:DP:AD:VAF:PL`) is reproduced
-  faithfully rather than reordered to a canonical form.
+  preserved. The FORMAT and sample columns are stored as written
+  (`format_keys`, `format_raw`), so the original order
+  (`GT:GQ:DP:AD:VAF:PL`) and values are reproduced exactly.
 
 ## Building
 
@@ -148,23 +148,55 @@ The `variants` table:
 | `format_gq`   | UInt32     | FORMAT/GQ                                              |
 | `format_pl`   | Utf8       | FORMAT/PL, comma-joined                                |
 | `allele_freq` | Float32    | INFO/AF for this ALT (if present)                      |
-| `format_extra`| Utf8       | other FORMAT fields (VAF, MIN_DP, ...) as `K=V;K=V`      |
-| `format_key_order`| Utf8   | original FORMAT key order (`GT:GQ:DP:AD:VAF:PL`), used by export |
-| `info_raw`    | Utf8       | full INFO column re-serialized; duplicated across ALTs |
+| `format_keys` | Utf8       | the FORMAT column exactly as written (`GT:GQ:DP:AD`)   |
+| `format_raw`  | Utf8       | the sample column exactly as written (`0/1:35:10:5,5`) |
+| `info_raw`    | Utf8       | the INFO column exactly as written; duplicated across ALTs |
+| `source_ordinal` | UInt64  | 0-based index of the source record in its file; rows of one record share it |
+| `norm_pos`, `norm_ref`, `norm_alt` | UInt64, Utf8, Utf8 | upper-cased, trimmed (`bcftools norm` style, not left-aligned) form used to join against ClinVar |
 
-The `clinvar` table adds `variation_id`, `gene_symbol`,
-`clinical_significance`, `review_status`, and `disease_name` columns.
+The `clinvar` table adds `variation_id`, `gene_symbol` (first gene),
+`gene_symbols` (list of every gene of GENEINFO), `clinical_significance`,
+`review_status`, `disease_name` and the same `norm_*` columns.
 
 The `samples` table (registry, one row per ingested sample) stores
-`sample_name`, `source_path`, `vcf_header` (raw text), `ingested_at`,
-and `reference`. It backs `genolance export`'s header reconstruction.
+`sample_name`, `source_path`, `vcf_header` (header text), `ingested_at`,
+`reference`, `contigs` (contig lengths), `assembly` and `ingest_complete`. It
+backs `genolance export`'s header reconstruction. The `store_meta` table holds
+the store `format_version` and the ClinVar release (`clinvar_release`,
+`clinvar_source`, `clinvar_assembly`, `clinvar_reference`, `clinvar_contigs`).
+
+**Format version.** A store records `MAJOR.MINOR` (currently 1.0). Another
+major is refused: a newer one asks for a newer genolance, an older one (and
+every store written before versions existed) cannot be upgraded in place and
+must be rebuilt by ingesting the VCFs and the ClinVar release into a new store
+directory. The same major opens at any minor; a newer minor is read-only. A new
+minor only adds nullable columns and metadata keys, and a command that needs a
+column an older store lacks stops with an error naming the table and column.
+Changing or removing a column, or what a value means, is a new major. A sample
+whose ingest was interrupted is refused by every command until it is
+re-ingested with `--replace`.
+
+**Alleles.** `join` and the other ClinVar commands match on an upper-cased,
+trimmed (parsimonious) form of REF/ALT, not a left-aligned one. Normalise
+inputs with `bcftools norm -f <reference.fa>` first, so a deletion in a repeat
+is written the way ClinVar writes it; symbolic, breakend and `*` alleles are
+stored but only join records that write them identically.
+
+**Assembly.** Each sample's and the ClinVar release's assembly (GRCh37, GRCh38,
+T2T-CHM13) is recorded at ingest, from contig lengths and the `##reference`
+line, or declared with `--assembly`. ClinVar files from NCBI have
+`##reference=GRCh38` and no `##contig` lines.
 
 ## Known limitations
 
 - Ingest is single-threaded per file; parallelism is on the CLI
   `files` list. For 100+ samples this will be the first thing to
   optimize.
-- `--gene` uses exact ClinVar `GENEINFO` symbol matching.
+- `--gene` matches any gene symbol of a ClinVar `GENEINFO` record, exactly
+  (case-sensitive).
+- `join`, `screen`, `compound-het` and `pgx` compare contig lengths in the
+  sample and ClinVar headers and stop on a mismatch (or when no contig can be
+  compared); `--skip-reference-check` turns that off.
 - Per-ALT split genotype (`genotype` column) is lossy for >2-allele
   sites; use `gt_raw` for the original call.
 - Chromosome naming (`chr1` vs `1`) is normalized in join/query/screen,
@@ -173,8 +205,8 @@ and `reference`. It backs `genolance export`'s header reconstruction.
   rewriting on ingest.
 - **`genolance export` is verified-lossless on DeepVariant VCFs**:
   all 10,000-site stress tests produce zero diffs (after float
-  QUAL normalization). FORMAT key order is stored per-row and reproduced
-  exactly. The only intentional semantic difference: QUAL `52.10` is
+  QUAL normalization). The FORMAT and sample columns are stored as written
+  and reproduced exactly. The only intentional semantic difference: QUAL `52.10` is
   emitted as `52.1` (equivalent float, `bcftools`-transparent).
 - Scalar indices are **not** built automatically - run
   `genolance index -s $STORE` once after ingest to create BTree
@@ -182,8 +214,6 @@ and `reference`. It backs `genolance export`'s header reconstruction.
   `gene_symbol`, and `clinical_significance`. Safe to re-run after
   further ingests to refresh. Gene queries go from ~5s to sub-second
   on the fixture data once indexed.
-- Stores created before the `format_key_order` schema change (April 2026)
-  need to be re-ingested; column additions are not auto-migrated.
 
 [Lance]: https://lancedb.github.io/lance/
 [pixi]: https://pixi.sh
