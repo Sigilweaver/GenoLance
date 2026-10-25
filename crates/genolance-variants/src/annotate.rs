@@ -26,8 +26,8 @@ use genolance_core::schema::VARIANTS_TABLE;
 use genolance_core::store::Store;
 
 use crate::common::{
-    carrier_state, chrom_predicate, normalize_chrom, opt_string, req_str, req_u64, require_samples,
-    sql_escape, Carrier,
+    carrier_state, chrom_predicate, normalize_alleles, normalize_chrom, opt_string, req_str,
+    req_u64, require_samples, sql_escape, Carrier,
 };
 
 type Key = (String, u64, String, String);
@@ -178,14 +178,15 @@ pub async fn run(
         }
 
         for (alt_idx, alt) in alts.iter().enumerate() {
-            let key: Key = (normalize_chrom(&chrom_s), pos_v, ref_a.clone(), alt.clone());
+            let (npos, nref, nalt) = normalize_alleles(pos_v, &ref_a, alt);
+            let key: Key = (normalize_chrom(&chrom_s), npos, nref, nalt);
             let Some(gt) = carriers.get(&key) else {
                 continue;
             };
             let mut row = vec![
-                key.0.clone(),
-                key.1.to_string(),
-                key.2.clone(),
+                normalize_chrom(&chrom_s),
+                pos_v.to_string(),
+                ref_a.clone(),
                 alt.clone(),
                 gt.clone(),
             ];
@@ -209,9 +210,9 @@ fn build_carrier_map(batches: &[RecordBatch]) -> Result<(HashMap<Key, String>, u
     let mut no_calls = 0usize;
     for b in batches {
         let chrom = req_str(b, VARIANTS, "chrom")?;
-        let pos = req_u64(b, VARIANTS, "pos")?;
-        let ref_a = req_str(b, VARIANTS, "ref_allele")?;
-        let alt_a = req_str(b, VARIANTS, "alt_allele")?;
+        let npos = req_u64(b, VARIANTS, "norm_pos")?;
+        let nref = req_str(b, VARIANTS, "norm_ref")?;
+        let nalt = req_str(b, VARIANTS, "norm_alt")?;
         let gt = req_str(b, VARIANTS, "genotype")?;
         for i in 0..b.num_rows() {
             let gt_s = opt_string(gt, i);
@@ -225,9 +226,9 @@ fn build_carrier_map(batches: &[RecordBatch]) -> Result<(HashMap<Key, String>, u
             }
             let key: Key = (
                 normalize_chrom(chrom.value(i)),
-                pos.value(i),
-                ref_a.value(i).to_string(),
-                alt_a.value(i).to_string(),
+                npos.value(i),
+                nref.value(i).to_string(),
+                nalt.value(i).to_string(),
             );
             map.insert(key, gt_s.unwrap_or_default());
         }
@@ -327,6 +328,9 @@ mod tests {
             Field::new("ref_allele", DataType::Utf8, false),
             Field::new("alt_allele", DataType::Utf8, false),
             Field::new("genotype", DataType::Utf8, true),
+            Field::new("norm_pos", DataType::UInt64, false),
+            Field::new("norm_ref", DataType::Utf8, false),
+            Field::new("norm_alt", DataType::Utf8, false),
         ]));
         RecordBatch::try_new(
             schema,
@@ -345,6 +349,15 @@ mod tests {
                 )),
                 Arc::new(StringArray::from(
                     rows.iter().map(|r| r.4).collect::<Vec<_>>(),
+                )),
+                Arc::new(UInt64Array::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
                 )),
             ],
         )

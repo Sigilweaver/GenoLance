@@ -114,6 +114,11 @@ enum Commands {
         /// (excluded and counted by default)
         #[arg(long = "keep-missing")]
         keep_missing: bool,
+
+        /// Skip the check that the samples and the ClinVar release use the
+        /// same assembly (compares contig lengths in the headers)
+        #[arg(long = "skip-reference-check")]
+        skip_reference_check: bool,
     },
 
     /// Combined carrier-screen + ClinVar pathogenicity filter across N samples.
@@ -163,6 +168,11 @@ enum Commands {
         /// (excluded and counted by default)
         #[arg(long = "keep-missing")]
         keep_missing: bool,
+
+        /// Skip the check that the samples and the ClinVar release use the
+        /// same assembly (compares contig lengths in the headers)
+        #[arg(long = "skip-reference-check")]
+        skip_reference_check: bool,
     },
 
     /// Flag genes where a single sample carries two or more P/LP heterozygous
@@ -209,6 +219,11 @@ enum Commands {
         /// (excluded and counted by default)
         #[arg(long = "keep-missing")]
         keep_missing: bool,
+
+        /// Skip the check that the samples and the ClinVar release use the
+        /// same assembly (compares contig lengths in the headers)
+        #[arg(long = "skip-reference-check")]
+        skip_reference_check: bool,
     },
 
     /// Annotate a sample's variants with arbitrary INFO fields from any VCF.
@@ -262,6 +277,10 @@ enum Commands {
         /// Include calls whose FILTER is not PASS (excluded and counted by default)
         #[arg(long = "include-filtered")]
         include_filtered: bool,
+        /// Skip the check that the samples and the ClinVar release use the
+        /// same assembly (compares contig lengths in the headers)
+        #[arg(long = "skip-reference-check")]
+        skip_reference_check: bool,
     },
 
     /// Export variants for a sample back to VCF (reconstructs original header).
@@ -386,6 +405,7 @@ async fn run(cli: Cli) -> genolance_core::Result<()> {
             gene_filter,
             include_filtered,
             keep_missing,
+            skip_reference_check,
         } => {
             let mut f = genolance_variants::filters::Filters::default();
             f.significance_substring = significance;
@@ -400,6 +420,7 @@ async fn run(cli: Cli) -> genolance_core::Result<()> {
                 .map(genolance_core::gene_lists::parse_gene_list);
             f.include_filtered = include_filtered;
             f.keep_missing = keep_missing;
+            f.skip_reference_check = skip_reference_check;
             genolance_variants::join::run(&store, against.as_deref(), &f).await?;
         }
         Commands::Screen {
@@ -413,6 +434,7 @@ async fn run(cli: Cli) -> genolance_core::Result<()> {
             gene_filter,
             include_filtered,
             keep_missing,
+            skip_reference_check,
         } => {
             let mut f = genolance_variants::filters::Filters::default();
             f.significance_substring = significance;
@@ -427,6 +449,7 @@ async fn run(cli: Cli) -> genolance_core::Result<()> {
                 .map(genolance_core::gene_lists::parse_gene_list);
             f.include_filtered = include_filtered;
             f.keep_missing = keep_missing;
+            f.skip_reference_check = skip_reference_check;
             genolance_variants::screen::run(&store, &samples, &f).await?;
         }
         Commands::CompoundHet {
@@ -440,6 +463,7 @@ async fn run(cli: Cli) -> genolance_core::Result<()> {
             gene_filter,
             include_filtered,
             keep_missing,
+            skip_reference_check,
         } => {
             let mut f = genolance_variants::filters::Filters::default();
             f.significance_substring = significance;
@@ -454,6 +478,7 @@ async fn run(cli: Cli) -> genolance_core::Result<()> {
                 .map(genolance_core::gene_lists::parse_gene_list);
             f.include_filtered = include_filtered;
             f.keep_missing = keep_missing;
+            f.skip_reference_check = skip_reference_check;
             genolance_variants::compound::run(&store, &sample, &f).await?;
         }
         Commands::Export {
@@ -515,9 +540,11 @@ async fn run(cli: Cli) -> genolance_core::Result<()> {
             sample,
             genes,
             include_filtered,
+            skip_reference_check,
         } => {
             let mut f = genolance_variants::filters::Filters::default();
             f.include_filtered = include_filtered;
+            f.skip_reference_check = skip_reference_check;
             genolance_variants::pgx::run(&store, &sample, &genes, &f).await?;
         }
         Commands::Index { store } => {

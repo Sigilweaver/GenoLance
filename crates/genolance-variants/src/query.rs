@@ -80,10 +80,7 @@ pub async fn run(
         let cv = store.variants.open_table(CLINVAR_TABLE).execute().await?;
         let stream = cv
             .query()
-            .only_if(format!(
-                "lower(gene_symbol) = '{}'",
-                sql_escape(&g.to_lowercase())
-            ))
+            .only_if(format!("gene_symbols LIKE '%|{}|%'", sql_escape(g)))
             .select(Select::columns(&["chrom", "pos"]))
             .execute()
             .await?;

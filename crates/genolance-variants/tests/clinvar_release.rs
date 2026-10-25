@@ -17,7 +17,7 @@ async fn store_with_two_clinvar_releases_is_an_error() {
         &vcf("S1", &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"]),
     );
     ingest_file(&t.store(), &t.path("s.vcf")).await.unwrap();
-    let cv = "##fileformat=VCFv4.2\n##contig=<ID=chr1,length=1000>\n\
+    let cv = "##fileformat=VCFv4.2\n##contig=<ID=chr1,length=100000>\n\
 ##INFO=<ID=CLNSIG,Number=.,Type=String,Description=\"s\">\n\
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
 chr1\t100\t1\tA\tG\t.\t.\tCLNSIG=Pathogenic\n";
@@ -43,6 +43,10 @@ chr1\t100\t1\tA\tG\t.\t.\tCLNSIG=Pathogenic\n";
             opt(Some("Benign")),
             opt(None),
             opt(None),
+            opt(None),
+            Arc::new(UInt64Array::from(vec![100u64])),
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(StringArray::from(vec!["G"])),
         ],
     )
     .unwrap();

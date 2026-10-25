@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
-use arrow_array::{Float32Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
+use arrow_array::{BooleanArray, Float32Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
 use arrow_schema::SchemaRef;
 use genolance_core::{Error, Result, ResultExt};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -24,9 +24,13 @@ use noodles::vcf::{
 use tokio::sync::mpsc;
 
 use genolance_core::schema::{
-    clinvar_schema, samples_schema, variant_schema, CLINVAR_TABLE, SAMPLES_TABLE, VARIANTS_TABLE,
+    clinvar_schema, samples_schema, variant_schema, CLINVAR_TABLE, META_CLINVAR_CONTIGS,
+    META_CLINVAR_REFERENCE, META_CLINVAR_RELEASE, META_CLINVAR_SOURCE, META_CLINVAR_STATE,
+    SAMPLES_TABLE, VARIANTS_TABLE,
 };
 use genolance_core::store::Store;
+
+use crate::common::normalize_alleles;
 
 /// Number of rows to buffer before flushing a batch to the Lance table.
 const BATCH_SIZE: usize = 10_000;
@@ -91,6 +95,12 @@ pub struct IngestReport {
     pub skipped_no_position: u64,
     /// Records skipped because ALT is `.` (reference-only sites).
     pub skipped_no_alt: u64,
+    /// Alleles stored with a trimmed join key different from the raw
+    /// REF/ALT (multi-allelic splits, padded indels).
+    pub normalized_alleles: u64,
+    /// DP or GQ values that are not non-negative integers; they are kept
+    /// as written in the sample column but not in the typed column.
+    pub unparsed_dp_gq: u64,
 }
 
 impl IngestReport {
@@ -99,6 +109,8 @@ impl IngestReport {
         self.rows += other.rows;
         self.skipped_no_position += other.skipped_no_position;
         self.skipped_no_alt += other.skipped_no_alt;
+        self.normalized_alleles += other.normalized_alleles;
+        self.unparsed_dp_gq += other.unparsed_dp_gq;
     }
 }
 
@@ -118,7 +130,7 @@ pub async fn run(store_path: &str, files: &[String], opts: &IngestOptions) -> Re
             files.len()
         )));
     }
-    let store = Store::open(store_path).await?;
+    let store = Store::open_or_create(store_path).await?;
 
     let mut report = IngestReport::default();
     for file in files {
@@ -159,13 +171,25 @@ async fn ingest_one(store: &Store, path: &str, opts: &IngestOptions) -> Result<I
 
     if is_clinvar {
         let table = open_or_create(&store.variants, CLINVAR_TABLE, clinvar_schema()).await?;
-        prepare_clinvar_table(&table, opts.replace).await?;
+        prepare_clinvar_table(store, &table, opts.replace).await?;
+        store.set_meta(META_CLINVAR_STATE, "incomplete").await?;
         let result = ingest_clinvar(&table, &mut reader, &header, path)
             .await
             .and_then(|r| tail.check_complete(path).map(|()| r));
         match result {
-            Ok(report) => Ok(report),
-            Err(e) => Err(rollback(delete_all(&table).await, e, "clinvar")),
+            Ok(report) => {
+                record_clinvar_release(store, &header, filename).await?;
+                store.set_meta(META_CLINVAR_STATE, "complete").await?;
+                Ok(report)
+            }
+            Err(e) => {
+                let cleanup = delete_all(&table).await;
+                let cleared = match cleanup {
+                    Ok(()) => store.clear_meta(META_CLINVAR_STATE).await,
+                    Err(e) => Err(e),
+                };
+                Err(rollback(cleared, e, "clinvar"))
+            }
         }
     } else {
         let col_idx = select_sample_column(path, &header, opts)?;
@@ -178,12 +202,15 @@ async fn ingest_one(store: &Store, path: &str, opts: &IngestOptions) -> Result<I
 
         let table = open_or_create(&store.variants, VARIANTS_TABLE, variant_schema()).await?;
         prepare_sample(store, &table, &sample_name, opts.replace).await?;
+        // Registered as incomplete first: an interrupted ingest leaves a
+        // flag that every command refuses, instead of silent partial rows.
+        register_sample(&store.conn, &sample_name, path, &header).await?;
 
         let result = ingest_variants(&table, &mut reader, &header, &sample_name, col_idx, path)
             .await
             .and_then(|r| tail.check_complete(path).map(|()| r));
         let result = match result {
-            Ok(r) => register_sample(&store.conn, &sample_name, path, &header)
+            Ok(r) => mark_sample_complete(&store.conn, &sample_name)
                 .await
                 .map(|()| r),
             Err(e) => Err(e),
@@ -192,13 +219,58 @@ async fn ingest_one(store: &Store, path: &str, opts: &IngestOptions) -> Result<I
             Ok(r) => r,
             Err(e) => {
                 let pred = format!("sample_name = '{}'", sql_escape(&sample_name));
-                let cleanup = table.delete(&pred).await.map(|_| ()).map_err(Error::from);
+                let cleanup = remove_sample(store, &table, &pred).await;
                 return Err(rollback(cleanup, e, &sample_name));
             }
         };
         ensure_variant_indices(&table).await?;
         Ok(report)
     }
+}
+
+/// Remove a sample's rows and its registry entry.
+async fn remove_sample(store: &Store, calls: &Table, pred: &str) -> Result<()> {
+    calls.delete(pred).await?;
+    if table_exists(&store.conn, SAMPLES_TABLE).await? {
+        let reg = store.conn.open_table(SAMPLES_TABLE).execute().await?;
+        reg.delete(pred).await?;
+    }
+    Ok(())
+}
+
+/// Record the ClinVar release (file date), source, reference and contig
+/// lengths so later commands can show the release and check the assembly.
+async fn record_clinvar_release(store: &Store, header: &vcf::Header, filename: &str) -> Result<()> {
+    use noodles::vcf::header::record::value::Collection;
+    let file_date = match header.other_records().get("fileDate") {
+        Some(Collection::Unstructured(list)) => list.first().cloned(),
+        _ => None,
+    };
+    store
+        .set_meta(
+            META_CLINVAR_RELEASE,
+            file_date.as_deref().unwrap_or("unknown"),
+        )
+        .await?;
+    store.set_meta(META_CLINVAR_SOURCE, filename).await?;
+    match extract_reference(header) {
+        Some(r) => store.set_meta(META_CLINVAR_REFERENCE, &r).await?,
+        None => store.clear_meta(META_CLINVAR_REFERENCE).await?,
+    }
+    store
+        .set_meta(META_CLINVAR_CONTIGS, &contigs_string(header))
+        .await?;
+    Ok(())
+}
+
+/// Contigs that declare a length, as "name:length,name:length".
+fn contigs_string(header: &vcf::Header) -> String {
+    header
+        .contigs()
+        .iter()
+        .filter_map(|(name, c)| c.length().map(|l| format!("{name}:{l}")))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Combine an ingest error with the outcome of removing its partial rows.
@@ -280,15 +352,26 @@ async fn prepare_sample(
     Ok(())
 }
 
-async fn prepare_clinvar_table(table: &Table, replace: bool) -> Result<()> {
+async fn prepare_clinvar_table(store: &Store, table: &Table, replace: bool) -> Result<()> {
     let existing = table.count_rows(None).await?;
-    if existing == 0 {
+    let interrupted = store.meta(META_CLINVAR_STATE).await?.as_deref() == Some("incomplete");
+    if existing == 0 && !interrupted {
         return Ok(());
     }
-    if !replace {
+    if !replace && !interrupted {
         return Err(Error::clinvar_release_present(existing));
     }
-    delete_all(table).await
+    delete_all(table).await?;
+    for key in [
+        META_CLINVAR_STATE,
+        META_CLINVAR_RELEASE,
+        META_CLINVAR_SOURCE,
+        META_CLINVAR_REFERENCE,
+        META_CLINVAR_CONTIGS,
+    ] {
+        store.clear_meta(key).await?;
+    }
+    Ok(())
 }
 
 /// Remembers the last byte handed to the VCF parser, so a file that stops
@@ -448,9 +531,7 @@ fn extract_reference(header: &vcf::Header) -> Option<String> {
     }
 }
 
-/// Record the sample in the registry. Called only after its variants were
-/// written and the file was checked complete, so a registry row means a
-/// finished ingest.
+/// Record the sample in the registry as not yet complete.
 async fn register_sample(
     conn: &Connection,
     sample_name: &str,
@@ -472,9 +553,23 @@ async fn register_sample(
             Arc::new(StringArray::from(vec![header_text])),
             Arc::new(StringArray::from(vec![Some(ingested_at)])),
             Arc::new(StringArray::from(vec![reference])),
+            Arc::new(BooleanArray::from(vec![false])),
+            Arc::new(StringArray::from(vec![Some(contigs_string(header))])),
         ],
     )?;
     table.add(vec![batch]).execute().await?;
+    Ok(())
+}
+
+/// Flip the registry flag once the file was read completely.
+async fn mark_sample_complete(conn: &Connection, sample_name: &str) -> Result<()> {
+    let table = conn.open_table(SAMPLES_TABLE).execute().await?;
+    table
+        .update()
+        .only_if(format!("sample_name = '{}'", sql_escape(sample_name)))
+        .column("ingest_complete", "true")
+        .execute()
+        .await?;
     Ok(())
 }
 
@@ -501,9 +596,13 @@ struct VariantBuffer {
     format_gq: Vec<Option<u32>>,
     format_pl: Vec<Option<String>>,
     allele_freq: Vec<Option<f32>>,
-    format_extra: Vec<Option<String>>,
-    format_key_order: Vec<Option<String>>,
+    format_keys: Vec<Option<String>>,
+    format_raw: Vec<Option<String>>,
     info_raw: Vec<Option<String>>,
+    source_ordinal: Vec<u64>,
+    norm_pos: Vec<u64>,
+    norm_ref: Vec<String>,
+    norm_alt: Vec<String>,
 }
 
 impl VariantBuffer {
@@ -533,9 +632,13 @@ impl VariantBuffer {
                 Arc::new(UInt32Array::from(self.format_gq)),
                 Arc::new(StringArray::from(self.format_pl)),
                 Arc::new(Float32Array::from(self.allele_freq)),
-                Arc::new(StringArray::from(self.format_extra)),
-                Arc::new(StringArray::from(self.format_key_order)),
+                Arc::new(StringArray::from(self.format_keys)),
+                Arc::new(StringArray::from(self.format_raw)),
                 Arc::new(StringArray::from(self.info_raw)),
+                Arc::new(UInt64Array::from(self.source_ordinal)),
+                Arc::new(UInt64Array::from(self.norm_pos)),
+                Arc::new(StringArray::from(self.norm_ref)),
+                Arc::new(StringArray::from(self.norm_alt)),
             ],
         )?;
         Ok(batch)
@@ -550,6 +653,10 @@ struct SkipCounts {
     no_position: u64,
     /// ALT is `.`: reference-only sites such as hom-ref blocks.
     no_alt: u64,
+    /// Alleles whose join key differs from the raw REF/ALT.
+    normalized: u64,
+    /// DP/GQ values kept only in the raw sample column.
+    unparsed_dp_gq: u64,
 }
 
 impl SkipCounts {
@@ -564,6 +671,18 @@ impl SkipCounts {
             eprintln!(
                 "skipped {} record(s) with ALT '.' (reference-only sites are not stored)",
                 self.no_alt
+            );
+        }
+        if self.normalized > 0 {
+            eprintln!(
+                "{} allele(s) stored with a trimmed join key that differs from REF/ALT",
+                self.normalized
+            );
+        }
+        if self.unparsed_dp_gq > 0 {
+            eprintln!(
+                "{} DP/GQ value(s) are not non-negative integers; they are kept in the raw sample column only",
+                self.unparsed_dp_gq
             );
         }
     }
@@ -605,6 +724,7 @@ async fn ingest_variants<R: std::io::BufRead>(
                     header,
                     sample_name,
                     sample_col,
+                    n as u64,
                     expected_samples,
                     &mut buffer,
                     &mut skipped,
@@ -657,6 +777,8 @@ async fn ingest_variants<R: std::io::BufRead>(
         rows: total,
         skipped_no_position: skipped.no_position,
         skipped_no_alt: skipped.no_alt,
+        normalized_alleles: skipped.normalized,
+        unparsed_dp_gq: skipped.unparsed_dp_gq,
     })
 }
 
@@ -697,9 +819,12 @@ struct SampleFormatFields {
     ad: Option<String>,
     gq: Option<u32>,
     pl: Option<String>,
-    extra: Option<String>,
-    /// Original FORMAT key order, colon-joined (e.g. "GT:GQ:DP:AD:VAF:PL").
-    key_order: Option<String>,
+    /// The FORMAT column exactly as written.
+    keys: Option<String>,
+    /// The chosen sample's column exactly as written.
+    raw: Option<String>,
+    /// DP/GQ values that did not fit the typed columns.
+    unparsed_dp_gq: u64,
 }
 
 fn invalid_format(chrom: &str, pos: u64, key: &str, reason: impl ToString) -> Error {
@@ -711,11 +836,13 @@ fn invalid_format(chrom: &str, pos: u64, key: &str, reason: impl ToString) -> Er
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_variant_rows(
     record: &vcf::Record,
     header: &vcf::Header,
     sample_name: &str,
     sample_col: usize,
+    ordinal: u64,
     expected_samples: usize,
     buf: &mut VariantBuffer,
     skipped: &mut SkipCounts,
@@ -812,6 +939,7 @@ fn append_variant_rows(
         None => None,
     };
     let alt_count = alt_count as u32;
+    skipped.unparsed_dp_gq += fmt.unparsed_dp_gq;
 
     for (alt_index, alt) in alt_list.into_iter().enumerate() {
         // Per-allele genotype: report whether the reference sample carries this alt.
@@ -840,35 +968,27 @@ fn append_variant_rows(
         buf.format_gq.push(fmt.gq);
         buf.format_pl.push(fmt.pl.clone());
         buf.allele_freq.push(af);
-        buf.format_extra.push(fmt.extra.clone());
-        buf.format_key_order.push(fmt.key_order.clone());
+        buf.format_keys.push(fmt.keys.clone());
+        buf.format_raw.push(fmt.raw.clone());
         buf.info_raw.push(info_raw.clone());
+        buf.source_ordinal.push(ordinal);
+        let (npos, nref, nalt) = normalize_alleles(
+            pos,
+            &ref_allele,
+            buf.alt_allele.last().expect("pushed above"),
+        );
+        if npos != pos
+            || nref != ref_allele
+            || &nalt != buf.alt_allele.last().expect("pushed above")
+        {
+            skipped.normalized += 1;
+        }
+        buf.norm_pos.push(npos);
+        buf.norm_ref.push(nref);
+        buf.norm_alt.push(nalt);
     }
 
     Ok(())
-}
-
-/// Escape a raw FORMAT value for storage in the `KEY=VAL;KEY=VAL`
-/// `format_extra` column: `%`, `;` and `=` become `%25`, `%3B`, `%3D`.
-pub(crate) fn encode_extra_value(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for c in raw.chars() {
-        match c {
-            '%' => out.push_str("%25"),
-            ';' => out.push_str("%3B"),
-            '=' => out.push_str("%3D"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Inverse of [`encode_extra_value`].
-pub(crate) fn decode_extra_value(stored: &str) -> String {
-    stored
-        .replace("%3B", ";")
-        .replace("%3D", "=")
-        .replace("%25", "%")
 }
 
 /// Extract GT, DP, AD, GQ, PL and the remaining FORMAT fields from the
@@ -888,8 +1008,16 @@ fn extract_sample_format_fields(
     };
     let raw_sample: &str = sample.as_ref();
 
-    let mut out = SampleFormatFields::default();
-    let mut extra_parts: Vec<String> = Vec::new();
+    let mut out = SampleFormatFields {
+        keys: samples
+            .as_ref()
+            .split('\t')
+            .next()
+            .filter(|k| !k.is_empty())
+            .map(str::to_string),
+        raw: Some(raw_sample.to_string()),
+        ..Default::default()
+    };
     let mut all_keys: Vec<String> = Vec::new();
     let mut raw_values = raw_sample.split(':');
     for result in sample.iter(header) {
@@ -928,24 +1056,15 @@ fn extract_sample_format_fields(
                 match &value {
                     None => {}
                     Some(SampleValue::Integer(n)) if *n >= 0 => *slot = Some(*n as u32),
-                    // Not a non-negative integer (a Float-typed GQ, a
-                    // negative sentinel): keep the text as written.
-                    Some(_) => extra_parts.push(format!("{key}={}", encode_extra_value(raw))),
+                    // Not a non-negative integer (a Float-typed GQ, a negative
+                    // sentinel): the typed column stays empty, the text
+                    // survives in the raw sample column.
+                    Some(_) => out.unparsed_dp_gq += 1,
                 }
             }
-            _ => extra_parts.push(format!("{key}={}", encode_extra_value(raw))),
+            _ => {}
         }
     }
-    out.extra = if extra_parts.is_empty() {
-        None
-    } else {
-        Some(extra_parts.join(";"))
-    };
-    out.key_order = if all_keys.is_empty() {
-        None
-    } else {
-        Some(all_keys.join(":"))
-    };
     Ok(out)
 }
 
@@ -1167,6 +1286,10 @@ struct ClinVarBuffer {
     clinical_significance: Vec<Option<String>>,
     review_status: Vec<Option<String>>,
     disease_name: Vec<Option<String>>,
+    gene_symbols: Vec<Option<String>>,
+    norm_pos: Vec<u64>,
+    norm_ref: Vec<String>,
+    norm_alt: Vec<String>,
 }
 
 impl ClinVarBuffer {
@@ -1188,6 +1311,10 @@ impl ClinVarBuffer {
                 Arc::new(StringArray::from(self.clinical_significance)),
                 Arc::new(StringArray::from(self.review_status)),
                 Arc::new(StringArray::from(self.disease_name)),
+                Arc::new(StringArray::from(self.gene_symbols)),
+                Arc::new(UInt64Array::from(self.norm_pos)),
+                Arc::new(StringArray::from(self.norm_ref)),
+                Arc::new(StringArray::from(self.norm_alt)),
             ],
         )?;
         Ok(batch)
@@ -1266,6 +1393,8 @@ async fn ingest_clinvar<R: std::io::BufRead>(
         rows: total,
         skipped_no_position: skipped.no_position,
         skipped_no_alt: skipped.no_alt,
+        normalized_alleles: skipped.normalized,
+        unparsed_dp_gq: skipped.unparsed_dp_gq,
     })
 }
 
@@ -1294,16 +1423,24 @@ fn append_clinvar_rows(
         Some(ids.join(";"))
     };
 
-    let gene_symbol = info_scalar_string(record, header, "GENEINFO")?.map(|s| {
-        // GENEINFO is formatted "SYMBOL:ID|SYMBOL:ID" → keep the first symbol.
-        s.split('|')
-            .next()
-            .unwrap_or(&s)
-            .split(':')
-            .next()
-            .unwrap_or(&s)
-            .to_string()
-    });
+    // GENEINFO is "SYMBOL:ID|SYMBOL:ID". Keep the first symbol in
+    // `gene_symbol` and every symbol, bar-delimited, in `gene_symbols`.
+    let genes: Vec<String> = info_scalar_string(record, header, "GENEINFO")?
+        .map(|s| {
+            s.split('|')
+                .filter_map(|part| part.split(':').next())
+                .map(str::trim)
+                .filter(|g| !g.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let gene_symbol = genes.first().cloned();
+    let gene_symbols = if genes.is_empty() {
+        None
+    } else {
+        Some(format!("|{}|", genes.join("|")))
+    };
 
     let clinical_significance = info_scalar_string(record, header, "CLNSIG")?;
     let review_status = info_scalar_string(record, header, "CLNREVSTAT")?;
@@ -1326,6 +1463,15 @@ fn append_clinvar_rows(
             .push(clinical_significance.clone());
         buf.review_status.push(review_status.clone());
         buf.disease_name.push(disease_name.clone());
+        buf.gene_symbols.push(gene_symbols.clone());
+        let last = buf.alt_allele.last().expect("pushed above");
+        let (npos, nref, nalt) = normalize_alleles(pos, &ref_allele, last);
+        if npos != pos || nref != ref_allele || &nalt != last {
+            skipped.normalized += 1;
+        }
+        buf.norm_pos.push(npos);
+        buf.norm_ref.push(nref);
+        buf.norm_alt.push(nalt);
     }
     if !any_alt {
         skipped.no_alt += 1;

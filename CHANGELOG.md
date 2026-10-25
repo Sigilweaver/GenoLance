@@ -104,6 +104,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   truncated or inconsistent, and 4 when the store's format version or layout
   is not supported.
 
+- The store records a format version. `genolance` refuses a store written by a
+  newer version (exit code 4), and a store written before format versions
+  (all earlier releases): it cannot be upgraded in place, so rebuild it by
+  ingesting the VCFs and the ClinVar release into a new store directory.
+  Commands that only read a store no longer create the directory when the path
+  is wrong; they fail with exit code 4.
+- A sample (or the ClinVar release) whose ingest was interrupted is registered
+  as incomplete, and every command refuses the store until it is re-ingested
+  with `--replace`.
+- `genolance export` writes the FORMAT and sample columns exactly as they were
+  ingested, and tells records that share a position apart by their source
+  record, so several multi-allelic records at one position export correctly.
+- Alleles are joined to ClinVar by a trimmed form of (pos, ref, alt), so a
+  multi-allelic split that keeps the shared REF (`GCA>GA`) matches ClinVar's
+  `GC>G`. The ingest summary counts the alleles whose key differs.
+- Every gene of a ClinVar `GENEINFO` record is stored and searched
+  (`query --gene`, `--genes`, `--acmg`, `pgx`, `compound-het`), not only the
+  first.
+- `join`, `screen`, `compound-het` and `pgx` print the stored ClinVar release
+  and compare contig lengths in the sample and ClinVar headers. A mismatch (for
+  example GRCh37 samples against a GRCh38 release), or no contig to compare,
+  is an error (exit code 3); `--skip-reference-check` turns the check off. A
+  sample name that is not registered is an error in these commands.
+- Float-typed or negative DP/GQ no longer need special handling: the sample
+  column is stored as written, and the ingest summary counts the values that
+  stay out of the typed columns.
+
 ### API breaks
 
 - `ingest::run` takes `&IngestOptions` and returns an `IngestReport`
@@ -117,6 +144,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typed (`MissingColumn`, `ClinVarConflict`, `MissingData`, `RegionEmpty`,
   `UnknownSample`, `UnknownGene`, ...); `InvalidArgument` is only for bad
   argument values.
+- `Store::open` no longer creates the store and checks its version; use
+  `Store::open_or_create` (ingest) to create one. Added `Store::meta`,
+  `set_meta` and `clear_meta`, `IngestReport::normalized_alleles` and
+  `unparsed_dp_gq`, and `Filters::skip_reference_check`.
+- Store schema: `variants` drops `format_extra` and `format_key_order` for
+  `format_keys` and `format_raw`, and gains `source_ordinal` and `norm_*`;
+  `clinvar` gains `gene_symbols` and `norm_*`; `samples` gains
+  `ingest_complete` and `contigs`; new `store_meta` table.
 - `join::Filters`, `screen::Filters` and `compound::Filters` are one
   `filters::Filters` (`#[non_exhaustive]`, new `include_filtered` and
   `keep_missing`). `pgx::run` takes a `&Filters`. `query::run` takes an

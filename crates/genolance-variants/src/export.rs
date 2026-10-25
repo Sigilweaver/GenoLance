@@ -71,13 +71,13 @@ pub async fn run(
     for b in &batches {
         collect_rows(b, &mut rows)?;
     }
-    // Stable sort by (chrom, pos, ref, alt_index) - rows of the same site
-    // land contiguous in alt_index order for group_consecutive().
+    // Sort by (chrom, pos, source record, alt_index): the rows of one source
+    // record end up contiguous in ALT order.
     rows.sort_by(|a, b| {
-        (chrom_key(&a.chrom), a.pos, &a.ref_allele, a.alt_index).cmp(&(
+        (chrom_key(&a.chrom), a.pos, a.source_ordinal, a.alt_index).cmp(&(
             chrom_key(&b.chrom),
             b.pos,
-            &b.ref_allele,
+            b.source_ordinal,
             b.alt_index,
         ))
     });
@@ -188,9 +188,10 @@ struct Row {
     format_ad: Option<String>,
     format_gq: Option<u32>,
     format_pl: Option<String>,
-    format_extra: Option<String>,
-    format_key_order: Option<String>,
+    format_keys: Option<String>,
+    format_raw: Option<String>,
     info_raw: Option<String>,
+    source_ordinal: u64,
 }
 
 /// Read the rows of one batch. Every column must be present with its
@@ -211,9 +212,10 @@ fn collect_rows(b: &RecordBatch, out: &mut Vec<Row>) -> Result<()> {
     let ad = Some(col_str(b, "format_ad").ok_or_else(|| missing_column(t, "format_ad"))?);
     let gq = Some(col_u32(b, "format_gq").ok_or_else(|| missing_column(t, "format_gq"))?);
     let pl = Some(col_str(b, "format_pl").ok_or_else(|| missing_column(t, "format_pl"))?);
-    let extra = Some(col_str(b, "format_extra").ok_or_else(|| missing_column(t, "format_extra"))?);
-    let key_order =
-        Some(col_str(b, "format_key_order").ok_or_else(|| missing_column(t, "format_key_order"))?);
+    let keys = Some(col_str(b, "format_keys").ok_or_else(|| missing_column(t, "format_keys"))?);
+    let raw = Some(col_str(b, "format_raw").ok_or_else(|| missing_column(t, "format_raw"))?);
+    let ordinal =
+        col_u64(b, "source_ordinal").ok_or_else(|| missing_column(t, "source_ordinal"))?;
     let info_raw = Some(col_str(b, "info_raw").ok_or_else(|| missing_column(t, "info_raw"))?);
 
     for i in 0..b.num_rows() {
@@ -232,109 +234,72 @@ fn collect_rows(b: &RecordBatch, out: &mut Vec<Row>) -> Result<()> {
             format_ad: str_opt(ad, i),
             format_gq: u32_opt(gq, i),
             format_pl: str_opt(pl, i),
-            format_extra: str_opt(extra, i),
-            format_key_order: str_opt(key_order, i),
+            format_keys: str_opt(keys, i),
+            format_raw: str_opt(raw, i),
             info_raw: str_opt(info_raw, i),
+            source_ordinal: ordinal.value(i),
         });
     }
     Ok(())
 }
 
-/// Rebuild source records from the per-ALT rows of one `(chrom, pos, ref)`.
-///
-/// A record is either one row with `alt_count == 1` (also what a
-/// split-biallelic input looks like, several of which can share a position)
-/// or `alt_count` rows with `alt_index` 0..alt_count. Anything else cannot be
-/// attributed to records without guessing and is an error.
-fn records_at_site<'a>(site: &[&'a Row]) -> Result<Vec<Vec<&'a Row>>> {
-    let head = site[0];
-    let ambiguous = |why: String| -> Error {
-        Error::malformed_record(head.chrom.clone(), head.pos, "alt rows", why)
-    };
-    let mut records: Vec<Vec<&'a Row>> = Vec::new();
-    let mut by_count: BTreeMap<u32, Vec<&'a Row>> = BTreeMap::new();
-    for &r in site {
-        if r.alt_count == 0 {
-            return Err(ambiguous("row has alt_count 0".into()));
-        }
-        if r.alt_count == 1 {
-            if r.alt_index != 0 {
-                return Err(ambiguous(format!(
-                    "alt_index {} with alt_count 1",
-                    r.alt_index
-                )));
-            }
-            records.push(vec![r]);
-        } else {
-            by_count.entry(r.alt_count).or_default().push(r);
-        }
+/// Group per-ALT rows into the source records they came from, by
+/// `source_ordinal`. Each record must hold exactly `alt_count` rows with
+/// `alt_index` 0..alt_count; anything else means the store is damaged.
+fn group_records<'a>(rows: &[&'a Row]) -> Result<Vec<Vec<&'a Row>>> {
+    let mut by_ordinal: BTreeMap<u64, Vec<&'a Row>> = BTreeMap::new();
+    for &r in rows {
+        by_ordinal.entry(r.source_ordinal).or_default().push(r);
     }
-    for (k, rows) in by_count {
-        if rows.len() != k as usize {
-            return Err(ambiguous(format!(
-                "{} rows with alt_count {k}; cannot tell which source records they belong to",
-                rows.len()
+    let mut records = Vec::new();
+    for (ordinal, mut rec) in by_ordinal {
+        rec.sort_by_key(|r| r.alt_index);
+        let head = rec[0];
+        let damaged = |why: String| -> Error {
+            Error::malformed_record(
+                head.chrom.clone(),
+                head.pos,
+                "alt rows",
+                format!("source record {ordinal}: {why}"),
+            )
+        };
+        if rec.len() != head.alt_count as usize {
+            return Err(damaged(format!(
+                "{} stored row(s) for {} ALT allele(s)",
+                rec.len(),
+                head.alt_count
             )));
         }
-        let mut sorted = rows;
-        sorted.sort_by_key(|r| r.alt_index);
-        if sorted
+        if rec
             .iter()
             .enumerate()
-            .any(|(i, r)| r.alt_index as usize != i)
+            .any(|(i, r)| r.alt_index as usize != i || r.pos != head.pos || r.chrom != head.chrom)
         {
-            return Err(ambiguous(format!(
-                "alt_index values do not cover 0..{k} exactly once"
-            )));
+            return Err(damaged(
+                "alt_index values do not cover 0..alt_count once".into(),
+            ));
         }
-        records.push(sorted);
-    }
-    for rec in &records {
-        check_record_consistent(rec).map_err(ambiguous)?;
+        records.push(rec);
     }
     Ok(records)
 }
 
-/// Rows of one record duplicate its site-level fields; they must agree.
-fn check_record_consistent(rec: &[&Row]) -> std::result::Result<(), String> {
-    let h = rec[0];
-    for r in &rec[1..] {
-        if r.gt_raw != h.gt_raw
-            || r.info_raw != h.info_raw
-            || r.quality != h.quality
-            || r.filter != h.filter
-            || r.ids != h.ids
-            || r.format_ad != h.format_ad
-            || r.format_pl != h.format_pl
-            || r.read_depth != h.read_depth
-            || r.format_gq != h.format_gq
-            || r.format_extra != h.format_extra
-        {
-            return Err(format!(
-                "rows for ALT {} and {} disagree on site-level fields",
-                h.alt_allele, r.alt_allele
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Split sorted rows into source records (see [`records_at_site`]).
+/// Split sorted rows into source records (see [`group_records`]).
 fn split_records(rows: &[Row]) -> Result<Vec<Vec<&Row>>> {
     let refs: Vec<&Row> = rows.iter().collect();
+    // Rows are sorted by (chrom, pos, ordinal): group per (chrom, pos) so the
+    // BTreeMap order inside group_records matches file order.
     let mut out = Vec::new();
     let mut start = 0usize;
-    while start < rows.len() {
-        let head = &rows[start];
+    while start < refs.len() {
         let mut end = start + 1;
-        while end < rows.len()
-            && rows[end].chrom == head.chrom
-            && rows[end].pos == head.pos
-            && rows[end].ref_allele == head.ref_allele
+        while end < refs.len()
+            && refs[end].chrom == refs[start].chrom
+            && refs[end].pos == refs[start].pos
         {
             end += 1;
         }
-        out.extend(records_at_site(&refs[start..end])?);
+        out.extend(group_records(&refs[start..end])?);
         start = end;
     }
     Ok(out)
@@ -354,69 +319,12 @@ fn write_site<W: Write>(w: &mut W, site: &[&Row], _sample_name: &str) -> Result<
     let qual_col = head.quality.map(format_qual).unwrap_or_else(|| ".".into());
     let filter_col = head.filter.as_deref().unwrap_or(".");
 
-    // Build a key→value map from stored fields so we can emit in any order.
     let info_col = head.info_raw.as_deref().unwrap_or(".");
 
-    // Map of FORMAT key → value for quick reconstruction.
-    let mut kv: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    if let Some(ref gt) = head.gt_raw {
-        kv.insert("GT".into(), gt.clone());
-    }
-    if let Some(ref ad) = head.format_ad {
-        kv.insert("AD".into(), ad.clone());
-    }
-    if let Some(dp) = head.read_depth {
-        kv.insert("DP".into(), dp.to_string());
-    }
-    if let Some(gq) = head.format_gq {
-        kv.insert("GQ".into(), gq.to_string());
-    }
-    if let Some(ref pl) = head.format_pl {
-        kv.insert("PL".into(), pl.clone());
-    }
-    if let Some(extra) = head.format_extra.as_deref() {
-        for part in extra.split(';') {
-            if part.is_empty() {
-                continue;
-            }
-            match part.split_once('=') {
-                Some((k, v)) => {
-                    kv.insert(k.to_string(), crate::ingest::decode_extra_value(v));
-                }
-                None => {
-                    kv.insert(part.to_string(), ".".to_string());
-                }
-            }
-        }
-    }
-
-    // Emit FORMAT keys in original source order if we have it; else fall back
-    // to canonical GT:AD:DP:GQ:PL:<extras> order.
-    let fmt_keys: Vec<String> = if let Some(order) = head.format_key_order.as_deref() {
-        order.split(':').map(str::to_string).collect()
-    } else {
-        let mut keys = vec!["GT", "AD", "DP", "GQ", "PL"]
-            .into_iter()
-            .filter(|k| kv.contains_key(*k))
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        // append any extras not already listed
-        for k in kv.keys() {
-            if !["GT", "AD", "DP", "GQ", "PL"].contains(&k.as_str()) {
-                keys.push(k.clone());
-            }
-        }
-        keys
-    };
-    let fmt_vals: Vec<String> = fmt_keys
-        .iter()
-        .map(|k| kv.get(k).cloned().unwrap_or_else(|| ".".into()))
-        .collect();
-
-    let (format_col, sample_col) = if fmt_keys.is_empty() {
-        (".".to_string(), ".".to_string())
-    } else {
-        (fmt_keys.join(":"), fmt_vals.join(":"))
+    // FORMAT and the sample column exactly as they were read.
+    let (format_col, sample_col) = match (head.format_keys.as_deref(), head.format_raw.as_deref()) {
+        (Some(k), Some(v)) => (k, v),
+        _ => (".", "."),
     };
 
     writeln!(
@@ -643,7 +551,7 @@ pub async fn run_merge(
         for (head_key, group) in groups {
             let n_records = {
                 let refs: Vec<&Row> = group.iter().collect();
-                records_at_site(&refs)?.len()
+                group_records(&refs)?.len()
             };
             if n_records != 1 {
                 return Err(Error::malformed_record(head_key.0, head_key.1, "merge", format!(

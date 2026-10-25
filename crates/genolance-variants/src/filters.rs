@@ -25,4 +25,7 @@ pub struct Filters {
     /// Keep calls whose QUAL/DP is missing when `min_qual`/`min_dp` is set.
     /// By default they are excluded and counted.
     pub keep_missing: bool,
+    /// Do not compare the sample's contig lengths with the ClinVar header.
+    /// Use only when the headers lack contig lengths.
+    pub skip_reference_check: bool,
 }
