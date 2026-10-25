@@ -181,3 +181,25 @@ async fn merge_rejects_split_records_of_one_sample() {
     assert!(matches!(ingest_error(&e), Error::MalformedRecord { .. }));
     assert!(!out.exists());
 }
+
+// S5: --chrom matches either spelling, and an empty region is an error.
+#[tokio::test]
+async fn export_chrom_matches_either_spelling_and_empty_region_errors() {
+    let t = Tmp::new();
+    let l = "chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1";
+    ingest_text(&t, "a.vcf", &vcf("S1", &[l])).await;
+    for c in ["chr1", "1"] {
+        let out = t.0.join(format!("out-{c}.vcf"));
+        export::run(&t.store(), "S1", Some(c), None, None, out.to_str())
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(text.lines().any(|x| x == l), "{c}");
+    }
+    let out = t.0.join("none.vcf");
+    let e = export::run(&t.store(), "S1", Some("chr9"), None, None, out.to_str())
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("region filter"), "{e:#}");
+    assert!(!out.exists());
+}

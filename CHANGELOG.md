@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expected column, rows at one position cannot be assigned to source records
   (several multi-allelic records with the same ALT count), or `--merge` finds
   several records for one sample at a site (split-biallelic input).
+- `export --chrom` (single and merge) matches `chr17` and `17`, and a region
+  filter that matches no rows is an error instead of an empty VCF. Merge
+  export treats `chr1` and `1` as one contig and writes the first sample's
+  spelling.
 - `export` keeps records that share a position separate (for example VCFs
   split with `bcftools norm -m-`) instead of merging them into one multi-ALT
   line that kept only the first record's genotype and fields.

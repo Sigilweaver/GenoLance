@@ -49,7 +49,7 @@ pub async fn run(
     let mut preds: Vec<String> = Vec::new();
     preds.push(format!("sample_name = '{}'", sql_escape(sample_name)));
     if let Some(c) = chrom {
-        preds.push(format!("chrom = '{}'", sql_escape(c)));
+        preds.push(chrom_predicate(c));
     }
     if let Some(s) = start {
         preds.push(format!("pos >= {s}"));
@@ -79,6 +79,14 @@ pub async fn run(
             b.alt_index,
         ))
     });
+
+    if rows.is_empty() && (chrom.is_some() || start.is_some() || end.is_some()) {
+        return Err(anyhow!(
+            "no variants of sample '{sample_name}' match the region filter ({}); \
+             check the contig name and positions",
+            region_text(chrom, start, end)
+        ));
+    }
 
     // Group rows into source records before any output is created, so a
     // store that cannot be exported faithfully fails without a partial file.
@@ -553,6 +561,46 @@ fn f32_opt(a: Option<&Float32Array>, i: usize) -> Option<f32> {
     }
 }
 
+/// Canonical chromosome key: `chr` prefix stripped, `M` folded into `MT`.
+fn normalize_chrom(c: &str) -> String {
+    let bare = c.strip_prefix("chr").unwrap_or(c);
+    if bare == "M" {
+        "MT".to_string()
+    } else {
+        bare.to_string()
+    }
+}
+
+/// SQL predicate matching a chromosome in any common spelling.
+fn chrom_predicate(c: &str) -> String {
+    let norm = normalize_chrom(c);
+    let bases: Vec<&str> = if norm == "MT" {
+        vec!["MT", "M"]
+    } else {
+        vec![norm.as_str()]
+    };
+    let ors: Vec<String> = bases
+        .iter()
+        .flat_map(|b| [b.to_string(), format!("chr{b}")])
+        .map(|f| format!("chrom = '{}'", sql_escape(&f)))
+        .collect();
+    format!("({})", ors.join(" OR "))
+}
+
+fn region_text(chrom: Option<&str>, start: Option<u64>, end: Option<u64>) -> String {
+    let mut parts = Vec::new();
+    if let Some(c) = chrom {
+        parts.push(format!("chrom {c}"));
+    }
+    if let Some(s) = start {
+        parts.push(format!("start {s}"));
+    }
+    if let Some(e) = end {
+        parts.push(format!("end {e}"));
+    }
+    parts.join(", ")
+}
+
 fn sql_escape(s: &str) -> String {
     s.replace('\'', "''")
 }
@@ -623,7 +671,7 @@ pub async fn run_merge(
     for (idx, s) in sample_names.iter().enumerate() {
         let mut preds = vec![format!("sample_name = '{}'", sql_escape(s))];
         if let Some(c) = chrom {
-            preds.push(format!("chrom = '{}'", sql_escape(c)));
+            preds.push(chrom_predicate(c));
         }
         if let Some(v) = start {
             preds.push(format!("pos >= {v}"));
@@ -654,7 +702,7 @@ pub async fn run_merge(
         let mut groups: BTreeMap<(String, u64, String), Vec<Row>> = BTreeMap::new();
         for r in rows {
             groups
-                .entry((r.chrom.clone(), r.pos, r.ref_allele.clone()))
+                .entry((normalize_chrom(&r.chrom), r.pos, r.ref_allele.clone()))
                 .or_default()
                 .push(r);
         }
@@ -683,6 +731,14 @@ pub async fn run_merge(
         per_sample.iter().flat_map(|m| m.keys().cloned()).collect();
     sites.sort_by(|a, b| (chrom_key(&a.0), a.1, &a.2).cmp(&(chrom_key(&b.0), b.1, &b.2)));
     sites.dedup();
+
+    if sites.is_empty() && (chrom.is_some() || start.is_some() || end.is_some()) {
+        return Err(anyhow!(
+            "no variants of the listed samples match the region filter ({}); \
+             check the contig name and positions",
+            region_text(chrom, start, end)
+        ));
+    }
 
     // Build every line first so a bad site fails before any output exists.
     let mut lines: Vec<String> = Vec::new();
@@ -852,7 +908,7 @@ fn merged_site_line(
 
     Ok(Some(format!(
         "{chrom}\t{pos}\t{id}\t{ref_a}\t{alt}\t{qual}\t{filter}\t{info}\tGT:AD:DP:GQ:PL\t{sample}",
-        chrom = key.0,
+        chrom = present[0][0].chrom,
         pos = key.1,
         id = if ids.is_empty() {
             ".".to_string()
