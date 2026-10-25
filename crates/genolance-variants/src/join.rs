@@ -1,46 +1,62 @@
-use std::collections::HashMap;
-
 use anyhow::{anyhow, Result};
-use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
+use arrow_array::{Array, RecordBatch};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use genolance_core::gene_lists::{gene_in_set, ACMG_SF_V3};
 use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
 
-type Key = (String, u64, String, String);
+use crate::common::{
+    build_clinvar_map, carrier_state, ensure_clinvar_unique, fmt_dp, fmt_qual, normalize_chrom,
+    opt_string, req_f32, req_str, req_u32, req_u64, significance_predicate, truncate,
+    validate_filters, Carrier, Gate,
+};
+pub use crate::filters::Filters;
 
-#[derive(Default, Clone)]
-pub struct Filters {
-    pub significance_substring: Option<String>,
-    pub significance_exact: Option<Vec<String>>,
-    pub min_qual: Option<f32>,
-    pub min_dp: Option<u32>,
-    pub acmg_only: bool,
-    pub gene_filter: Option<Vec<String>>,
-}
+type Key = (String, u64, String, String);
 
 /// Annotate variants in the store by joining against the `clinvar` table.
 ///
 /// The join is performed in-memory on (chrom, pos, ref, alt). The
 /// ClinVar side is filtered by significance (substring or exact-list)
-/// and optionally by gene set (ACMG SF v3 or user-supplied). The
-/// variants side is filtered by `min_qual` / `min_dp` in SQL so we
-/// stream fewer rows out of storage.
-pub async fn run(store_path: &str, annotation_vcf: &str, f: &Filters) -> Result<()> {
+/// and optionally by gene set (ACMG SF v3 or user-supplied). Calls whose
+/// FILTER is not PASS, and calls with a missing QUAL/DP when a minimum is
+/// set, are excluded and counted unless `Filters` says otherwise.
+///
+/// `annotation_vcf` is only used to load ClinVar when the store has none. If
+/// the store already holds a release, passing a file is an error: the stored
+/// release is what the join uses, and a different file would be silently
+/// ignored. Load a new release with `genolance ingest --replace`.
+pub async fn run(store_path: &str, annotation_vcf: Option<&str>, f: &Filters) -> Result<()> {
+    validate_filters(f)?;
     let store = Store::open(store_path).await?;
 
     // Make sure the ClinVar table exists - ingest it on demand if missing.
     let tables = store.variants.table_names().execute().await?;
-    if !tables.iter().any(|n| n == CLINVAR_TABLE) {
-        println!("[join] '{CLINVAR_TABLE}' table not found; ingesting {annotation_vcf} ...");
-        crate::ingest::run(
-            store_path,
-            std::slice::from_ref(&annotation_vcf.to_string()),
-            &crate::ingest::IngestOptions::new().with_clinvar(true),
-        )
-        .await?;
+    let have_clinvar = tables.iter().any(|n| n == CLINVAR_TABLE);
+    match (have_clinvar, annotation_vcf) {
+        (true, Some(file)) => {
+            return Err(anyhow!(
+                "the store already holds a ClinVar release, so `join` would ignore {file}; \
+                 drop --against to use the stored release, or load the file with \
+                 `genolance ingest --replace {file}`"
+            ));
+        }
+        (false, None) => {
+            return Err(anyhow!(
+                "the store has no '{CLINVAR_TABLE}' table; pass --against <clinvar.vcf.gz> or run `genolance ingest` on it first"
+            ));
+        }
+        (false, Some(file)) => {
+            println!("[join] '{CLINVAR_TABLE}' table not found; ingesting {file} ...");
+            crate::ingest::run(
+                store_path,
+                std::slice::from_ref(&file.to_string()),
+                &crate::ingest::IngestOptions::new().with_clinvar(true),
+            )
+            .await?;
+        }
+        (true, None) => {}
     }
     if !tables.iter().any(|n| n == VARIANTS_TABLE)
         && !store
@@ -58,10 +74,10 @@ pub async fn run(store_path: &str, annotation_vcf: &str, f: &Filters) -> Result<
 
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
     let clinvar = store.variants.open_table(CLINVAR_TABLE).execute().await?;
+    ensure_clinvar_unique(&clinvar).await?;
 
-    // ClinVar predicate: significance-exact OR substring, default substring "pathogenic"
-    // only applies when no filter is given at all.
-    let cv_pred = build_clinvar_predicate(f);
+    // ClinVar predicate: significance-exact OR substring; no filter matches everything.
+    let cv_pred = build_clinvar_predicate(f)?;
     let cv_batches: Vec<RecordBatch> = clinvar
         .query()
         .only_if(cv_pred)
@@ -69,7 +85,7 @@ pub async fn run(store_path: &str, annotation_vcf: &str, f: &Filters) -> Result<
         .await?
         .try_collect()
         .await?;
-    let cv_map = build_clinvar_map(&cv_batches, f);
+    let cv_map = build_clinvar_map(&cv_batches, f)?;
     println!(
         "[join] {} ClinVar records in lookup (after filters)",
         cv_map.len()
@@ -78,13 +94,14 @@ pub async fn run(store_path: &str, annotation_vcf: &str, f: &Filters) -> Result<
         return Ok(());
     }
 
-    // Variants predicate: push min_qual / min_dp into SQL.
+    // Variants predicate: push min_qual / min_dp into SQL, keeping NULLs so
+    // they can be counted (or kept) below.
     let mut pred_parts: Vec<String> = Vec::new();
     if let Some(q) = f.min_qual {
-        pred_parts.push(format!("quality >= {}", q));
+        pred_parts.push(format!("(quality IS NULL OR quality >= {q})"));
     }
     if let Some(d) = f.min_dp {
-        pred_parts.push(format!("read_depth >= {}", d));
+        pred_parts.push(format!("(read_depth IS NULL OR read_depth >= {d})"));
     }
     let mut vq = variants.query();
     if !pred_parts.is_empty() {
@@ -93,179 +110,91 @@ pub async fn run(store_path: &str, annotation_vcf: &str, f: &Filters) -> Result<
     let v_batches: Vec<RecordBatch> = vq.execute().await?.try_collect().await?;
 
     println!(
-        "{:<16} {:<8} {:<12} {:<4} {:<4} {:<10} {:>5} {:>4} {:<12} {:<30} disease",
-        "sample", "chrom", "pos", "ref", "alt", "gt", "qual", "dp", "gene", "significance"
+        "{:<16} {:<8} {:<12} {:<4} {:<4} {:<10} {:>5} {:>4} {:<8} {:<12} {:<30} disease",
+        "sample",
+        "chrom",
+        "pos",
+        "ref",
+        "alt",
+        "gt",
+        "qual",
+        "dp",
+        "filter",
+        "gene",
+        "significance"
     );
-    println!("{}", "-".repeat(140));
+    println!("{}", "-".repeat(150));
     let mut matches = 0usize;
+    let mut gate = Gate::new(f);
     for b in &v_batches {
-        let sample = col_str(b, "sample_name");
-        let chrom = col_str(b, "chrom");
-        let pos = col_u64(b, "pos");
-        let ref_a = col_str(b, "ref_allele");
-        let alt_a = col_str(b, "alt_allele");
-        let gt = col_str(b, "genotype");
-        let qual = col_f32(b, "quality");
-        let dp = col_u32(b, "read_depth");
+        let t = VARIANTS_TABLE;
+        let sample = req_str(b, t, "sample_name")?;
+        let chrom = req_str(b, t, "chrom")?;
+        let pos = req_u64(b, t, "pos")?;
+        let ref_a = req_str(b, t, "ref_allele")?;
+        let alt_a = req_str(b, t, "alt_allele")?;
+        let gt = req_str(b, t, "genotype")?;
+        let qual = req_f32(b, t, "quality")?;
+        let dp = req_u32(b, t, "read_depth")?;
+        let filter = req_str(b, t, "filter")?;
         for i in 0..b.num_rows() {
-            let (Some(s), Some(c), Some(p), Some(r), Some(a)) = (sample, chrom, pos, ref_a, alt_a)
-            else {
-                continue;
-            };
-            let key: Key = (
-                normalize_chrom(c.value(i)),
-                p.value(i),
-                r.value(i).to_string(),
-                a.value(i).to_string(),
-            );
-            if let Some(ann) = cv_map.get(&key) {
-                let gt_s = gt.map(|g| g.value(i)).unwrap_or("");
-                // Skip purely-reference genotypes so we only surface carriers.
-                if gt_s.chars().any(|c| c == '1') || gt_s.is_empty() {
-                    matches += 1;
-                    println!(
-                        "{:<16} {:<8} {:<12} {:<4} {:<4} {:<10} {:>5.1} {:>4} {:<12} {:<30} {}",
-                        s.value(i),
-                        c.value(i),
-                        p.value(i),
-                        truncate(r.value(i), 4),
-                        truncate(a.value(i), 4),
-                        gt_s,
-                        qual.map(|a| a.value(i)).unwrap_or(0.0),
-                        dp.map(|a| a.value(i)).unwrap_or(0),
-                        ann.gene_symbol.as_deref().unwrap_or(""),
-                        truncate(ann.clinical_significance.as_deref().unwrap_or(""), 30),
-                        ann.disease_name.as_deref().unwrap_or(""),
-                    );
-                }
-            }
-        }
-    }
-    println!("{}", "-".repeat(140));
-    println!("{matches} annotated variants");
-    Ok(())
-}
-
-struct Annotation {
-    gene_symbol: Option<String>,
-    clinical_significance: Option<String>,
-    disease_name: Option<String>,
-}
-
-fn build_clinvar_predicate(f: &Filters) -> String {
-    if let Some(list) = &f.significance_exact {
-        let ors: Vec<String> = list
-            .iter()
-            .map(|s| {
-                format!(
-                    "lower(clinical_significance) = '{}'",
-                    sql_escape(&s.to_lowercase())
-                )
-            })
-            .collect();
-        if ors.is_empty() {
-            "1=1".to_string()
-        } else {
-            format!("({})", ors.join(" OR "))
-        }
-    } else if let Some(sub) = &f.significance_substring {
-        format!(
-            "lower(clinical_significance) LIKE '%{}%'",
-            sql_escape(&sub.to_lowercase())
-        )
-    } else {
-        // No filter: match everything.
-        "1=1".to_string()
-    }
-}
-
-fn build_clinvar_map(batches: &[RecordBatch], f: &Filters) -> HashMap<Key, Annotation> {
-    let mut map = HashMap::new();
-    for b in batches {
-        let chrom = col_str(b, "chrom");
-        let pos = col_u64(b, "pos");
-        let ref_a = col_str(b, "ref_allele");
-        let alt_a = col_str(b, "alt_allele");
-        let gene = col_str(b, "gene_symbol");
-        let sig = col_str(b, "clinical_significance");
-        let dis = col_str(b, "disease_name");
-        let (Some(chrom), Some(pos), Some(ref_a), Some(alt_a)) = (chrom, pos, ref_a, alt_a) else {
-            continue;
-        };
-        for i in 0..b.num_rows() {
-            let gene_s = gene
-                .and_then(|a| (!a.is_null(i)).then(|| a.value(i).to_string()))
-                .unwrap_or_default();
-            if f.acmg_only && !gene_in_set(&gene_s, ACMG_SF_V3) {
-                continue;
-            }
-            if let Some(list) = &f.gene_filter {
-                if !list.iter().any(|g| g.eq_ignore_ascii_case(&gene_s)) {
-                    continue;
-                }
-            }
             let key: Key = (
                 normalize_chrom(chrom.value(i)),
                 pos.value(i),
                 ref_a.value(i).to_string(),
                 alt_a.value(i).to_string(),
             );
-            map.insert(
-                key,
-                Annotation {
-                    gene_symbol: if gene_s.is_empty() {
-                        None
-                    } else {
-                        Some(gene_s)
-                    },
-                    clinical_significance: sig
-                        .and_then(|a| (!a.is_null(i)).then(|| a.value(i).to_string())),
-                    disease_name: dis.and_then(|a| (!a.is_null(i)).then(|| a.value(i).to_string())),
-                },
+            let Some(ann) = cv_map.get(&key) else {
+                continue;
+            };
+            let gt_s = opt_string(gt, i);
+            match carrier_state(gt_s.as_deref()) {
+                Carrier::Yes => {}
+                Carrier::No => continue,
+                Carrier::NoCall => {
+                    gate.no_call += 1;
+                    continue;
+                }
+            }
+            let q = (!qual.is_null(i)).then(|| qual.value(i));
+            let d = (!dp.is_null(i)).then(|| dp.value(i));
+            let fl = opt_string(filter, i);
+            if !gate.admit(fl.as_deref(), q, d) {
+                continue;
+            }
+            matches += 1;
+            println!(
+                "{:<16} {:<8} {:<12} {:<4} {:<4} {:<10} {:>5} {:>4} {:<8} {:<12} {:<30} {}",
+                sample.value(i),
+                chrom.value(i),
+                pos.value(i),
+                truncate(ref_a.value(i), 4),
+                truncate(alt_a.value(i), 4),
+                gt_s.as_deref().unwrap_or("."),
+                fmt_qual(q),
+                fmt_dp(d),
+                truncate(fl.as_deref().unwrap_or("."), 8),
+                ann.gene_symbol.as_deref().unwrap_or(""),
+                truncate(ann.clinical_significance.as_deref().unwrap_or(""), 30),
+                ann.disease_name.as_deref().unwrap_or(""),
             );
         }
     }
-    map
+    println!("{}", "-".repeat(150));
+    println!("{matches} annotated variants");
+    gate.report("join");
+    Ok(())
 }
 
-fn col_str<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a StringArray> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-}
-fn col_u64<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a UInt64Array> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
-}
-fn col_u32<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a UInt32Array> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
-}
-fn col_f32<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a Float32Array> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-}
-
-/// Normalize chromosome to "chr"-stripped form (so "chr1" and "1" compare equal).
-fn normalize_chrom(c: &str) -> String {
-    c.strip_prefix("chr").unwrap_or(c).to_string()
-}
-
-fn sql_escape(s: &str) -> String {
-    s.replace('\'', "''")
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() > n {
-        let cut: String = s.chars().take(n.saturating_sub(1)).collect();
-        format!("{cut}...")
-    } else {
-        s.to_string()
-    }
+fn build_clinvar_predicate(f: &Filters) -> Result<String> {
+    significance_predicate(f, None)
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+    use arrow_array::{StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -310,69 +239,40 @@ mod tests {
     }
 
     #[test]
-    fn normalize_chrom_strips_prefix() {
-        assert_eq!(normalize_chrom("chr1"), "1");
-        assert_eq!(normalize_chrom("1"), "1");
-        assert_eq!(normalize_chrom("chrX"), "X");
-    }
-
-    #[test]
-    fn sql_escape_doubles_single_quotes() {
-        assert_eq!(sql_escape("O'Brien"), "O''Brien");
-        assert_eq!(sql_escape("plain"), "plain");
-    }
-
-    #[test]
-    fn truncate_short_string_is_unchanged() {
-        assert_eq!(truncate("abc", 10), "abc");
-    }
-
-    #[test]
-    fn truncate_long_string_gets_ellipsis() {
-        assert_eq!(truncate("abcdefgh", 4), "abc...");
-    }
-
-    #[test]
     fn build_clinvar_predicate_defaults_to_match_all_without_filters() {
-        assert_eq!(build_clinvar_predicate(&Filters::default()), "1=1");
+        assert_eq!(build_clinvar_predicate(&Filters::default()).unwrap(), "1=1");
     }
 
     #[test]
     fn build_clinvar_predicate_uses_substring_filter() {
-        let f = Filters {
-            significance_substring: Some("Pathogenic".to_string()),
-            ..Default::default()
-        };
+        let mut f = Filters::default();
+        f.significance_substring = Some("Pathogenic".to_string());
         assert_eq!(
-            build_clinvar_predicate(&f),
+            build_clinvar_predicate(&f).unwrap(),
             "lower(clinical_significance) LIKE '%pathogenic%'"
         );
     }
 
     #[test]
     fn build_clinvar_predicate_prefers_exact_list_over_substring() {
-        let f = Filters {
-            significance_substring: Some("ignored".to_string()),
-            significance_exact: Some(vec![
-                "Pathogenic".to_string(),
-                "Likely_pathogenic".to_string(),
-            ]),
-            ..Default::default()
-        };
+        let mut f = Filters::default();
+        f.significance_substring = Some("ignored".to_string());
+        f.significance_exact = Some(vec![
+            "Pathogenic".to_string(),
+            "Likely_pathogenic".to_string(),
+        ]);
         assert_eq!(
-            build_clinvar_predicate(&f),
+            build_clinvar_predicate(&f).unwrap(),
             "(lower(clinical_significance) = 'pathogenic' OR lower(clinical_significance) = 'likely_pathogenic')"
         );
     }
 
     #[test]
     fn build_clinvar_predicate_escapes_quotes() {
-        let f = Filters {
-            significance_substring: Some("O'Brien".to_string()),
-            ..Default::default()
-        };
+        let mut f = Filters::default();
+        f.significance_substring = Some("O'Brien".to_string());
         assert_eq!(
-            build_clinvar_predicate(&f),
+            build_clinvar_predicate(&f).unwrap(),
             "lower(clinical_significance) LIKE '%o''brien%'"
         );
     }
@@ -383,7 +283,7 @@ mod tests {
             ("chr1", 100, "A", "T", "BRCA1", "Pathogenic", "Cancer"),
             ("2", 200, "C", "G", "", "Benign", ""),
         ]);
-        let map = build_clinvar_map(&[batch], &Filters::default());
+        let map = build_clinvar_map(&[batch], &Filters::default()).unwrap();
         assert_eq!(map.len(), 2);
 
         let ann = map
@@ -405,11 +305,9 @@ mod tests {
             ("1", 100, "A", "T", "BRCA1", "Pathogenic", "Cancer"), // in ACMG_SF_V3
             ("1", 200, "C", "G", "NOTAREALGENE", "Pathogenic", "Other"),
         ]);
-        let f = Filters {
-            acmg_only: true,
-            ..Default::default()
-        };
-        let map = build_clinvar_map(&[batch], &f);
+        let mut f = Filters::default();
+        f.acmg_only = true;
+        let map = build_clinvar_map(&[batch], &f).unwrap();
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&("1".to_string(), 100, "A".to_string(), "T".to_string())));
     }
@@ -420,12 +318,27 @@ mod tests {
             ("1", 100, "A", "T", "brca1", "Pathogenic", "Cancer"),
             ("1", 200, "C", "G", "TP53", "Pathogenic", "Other"),
         ]);
-        let f = Filters {
-            gene_filter: Some(vec!["BRCA1".to_string()]),
-            ..Default::default()
-        };
-        let map = build_clinvar_map(&[batch], &f);
+        let mut f = Filters::default();
+        f.gene_filter = Some(vec!["BRCA1".to_string()]);
+        let map = build_clinvar_map(&[batch], &f).unwrap();
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&("1".to_string(), 100, "A".to_string(), "T".to_string())));
+    }
+
+    #[test]
+    fn empty_exact_list_is_an_error_not_match_all() {
+        let mut f = Filters::default();
+        f.significance_exact = Some(vec![]);
+        assert!(build_clinvar_predicate(&f).is_err());
+    }
+
+    #[test]
+    fn conflicting_duplicate_clinvar_rows_are_an_error() {
+        let batch = clinvar_batch(&[
+            ("1", 100, "A", "T", "BRCA1", "Pathogenic", "Cancer"),
+            ("chr1", 100, "A", "T", "BRCA1", "Benign", "Cancer"),
+        ]);
+        let err = build_clinvar_map(&[batch], &Filters::default()).unwrap_err();
+        assert!(format!("{err}").contains("more than one release"), "{err}");
     }
 }

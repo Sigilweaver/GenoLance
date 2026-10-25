@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Context, Result};
-use arrow_array::{Array, RecordBatch, StringArray, UInt64Array};
+use arrow_array::RecordBatch;
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use noodles::vcf::{
@@ -24,8 +24,16 @@ use noodles::vcf::{
 
 use genolance_core::schema::VARIANTS_TABLE;
 use genolance_core::store::Store;
+use genolance_core::Error;
+
+use crate::common::{
+    carrier_state, chrom_predicate, normalize_chrom, opt_string, req_str, req_u64, require_samples,
+    sql_escape, Carrier,
+};
 
 type Key = (String, u64, String, String);
+
+const VARIANTS: &str = VARIANTS_TABLE;
 
 pub async fn run(
     store_path: &str,
@@ -48,17 +56,42 @@ pub async fn run(
         return Err(anyhow!("store has no '{VARIANTS_TABLE}' table"));
     }
 
+    require_samples(&store, std::slice::from_ref(&sample_name.to_string())).await?;
+
+    // Open the annotation file first: a truncated or wrongly compressed file,
+    // or an --info key it does not declare, must fail before any output.
+    let (mut reader, tail) = crate::ingest::open_vcf_reader(annotation_vcf)
+        .with_context(|| format!("opening {annotation_vcf}"))?;
+    let header = reader
+        .read_header()
+        .with_context(|| format!("reading header of {annotation_vcf}"))?;
+    let undeclared: Vec<&String> = info_fields
+        .iter()
+        .filter(|f| !header.infos().contains_key(f.as_str()))
+        .collect();
+    if !undeclared.is_empty() {
+        return Err(anyhow!(
+            "{annotation_vcf} does not declare INFO key(s) {}; declared keys: {}",
+            undeclared
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            header
+                .infos()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
     // 1. Pull sample variants for the region.
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
     let mut preds = vec![format!("sample_name = '{}'", sql_escape(sample_name))];
     if let Some(c) = chrom {
-        // Accept either "chr17" or "17" - match both forms in the store.
-        let bare = c.strip_prefix("chr").unwrap_or(c);
-        preds.push(format!(
-            "(chrom = '{}' OR chrom = 'chr{}')",
-            sql_escape(bare),
-            sql_escape(bare)
-        ));
+        // Accept "chr17" or "17" (and chrM, M, MT) - match every form in the store.
+        preds.push(chrom_predicate(c));
     }
     if let Some(v) = start {
         preds.push(format!("pos >= {v}"));
@@ -74,22 +107,21 @@ pub async fn run(
         .try_collect()
         .await?;
 
-    let carriers = build_carrier_map(&batches);
+    let (carriers, no_calls) = build_carrier_map(&batches)?;
     eprintln!(
         "[annotate] {} carrier sites in query region",
         carriers.len()
     );
+    if no_calls > 0 {
+        eprintln!(
+            "[annotate] {no_calls} no-call row(s) in the region were not treated as carriers"
+        );
+    }
     if carriers.is_empty() {
         return Ok(());
     }
 
     // 2. Stream the annotation VCF, emit matched rows with requested INFO fields.
-    let mut reader = vcf::io::reader::Builder::default()
-        .build_from_path(annotation_vcf)
-        .with_context(|| format!("opening {annotation_vcf}"))?;
-    let header = reader
-        .read_header()
-        .with_context(|| format!("reading header of {annotation_vcf}"))?;
 
     // Print column header.
     let mut hdr = vec![
@@ -105,14 +137,19 @@ pub async fn run(
     println!("{}", hdr.join("\t"));
 
     let mut matched = 0usize;
-    for result in reader.records() {
-        let record = result?;
+    for (n, result) in reader.records().enumerate() {
+        let record =
+            result.with_context(|| format!("{annotation_vcf}: reading record {}", n + 1))?;
         let chrom_s = record.reference_sequence_name().to_string();
         let Some(pos_r) = record.variant_start() else {
             continue;
         };
-        let pos_v = usize::from(pos_r?) as u64;
-        // Quick region short-circuit (linear scan; annotation VCF is not indexed here).
+        let pos_v = usize::from(
+            pos_r.with_context(|| format!("{annotation_vcf}: record {}: invalid POS", n + 1))?,
+        ) as u64;
+        // Region filter. The annotation VCF is scanned linearly and in full:
+        // stopping at the first record past --end would silently skip
+        // records of an unsorted or concatenated file.
         if let Some(c) = chrom {
             if normalize_chrom(&chrom_s) != normalize_chrom(c) {
                 continue;
@@ -125,22 +162,18 @@ pub async fn run(
         }
         if let Some(e) = end {
             if pos_v > e {
-                // If sorted by pos we could break, but the file may span multiple
-                // chroms - a full skip only when chrom also matches the filter.
-                if chrom.is_some() {
-                    break;
-                } else {
-                    continue;
-                }
+                continue;
             }
         }
 
         let ref_a = record.reference_bases().to_string();
-        let alts: Vec<String> = record
-            .alternate_bases()
-            .iter()
-            .filter_map(|a| a.ok().map(|s| s.to_string()))
-            .collect();
+        let mut alts: Vec<String> = Vec::new();
+        for a in record.alternate_bases().iter() {
+            alts.push(
+                a.with_context(|| format!("{annotation_vcf}: {chrom_s}:{pos_v}: invalid ALT"))?
+                    .to_string(),
+            );
+        }
 
         for (alt_idx, alt) in alts.iter().enumerate() {
             let key: Key = (normalize_chrom(&chrom_s), pos_v, ref_a.clone(), alt.clone());
@@ -155,34 +188,38 @@ pub async fn run(
                 gt.clone(),
             ];
             for field in info_fields {
-                row.push(extract_info(&record, &header, field, alt_idx));
+                row.push(
+                    extract_info(&record, &header, field, alt_idx, alts.len())
+                        .with_context(|| format!("{annotation_vcf}: {chrom_s}:{pos_v}"))?,
+                );
             }
             println!("{}", row.join("\t"));
             matched += 1;
         }
     }
+    tail.check_complete(annotation_vcf)?;
     eprintln!("[annotate] {matched} annotated variants emitted");
     Ok(())
 }
 
-fn build_carrier_map(batches: &[RecordBatch]) -> HashMap<Key, String> {
+fn build_carrier_map(batches: &[RecordBatch]) -> Result<(HashMap<Key, String>, usize)> {
     let mut map = HashMap::new();
+    let mut no_calls = 0usize;
     for b in batches {
-        let chrom = col_str(b, "chrom");
-        let pos = col_u64(b, "pos");
-        let ref_a = col_str(b, "ref_allele");
-        let alt_a = col_str(b, "alt_allele");
-        let gt = col_str(b, "genotype");
-        let (Some(chrom), Some(pos), Some(ref_a), Some(alt_a)) = (chrom, pos, ref_a, alt_a) else {
-            continue;
-        };
+        let chrom = req_str(b, VARIANTS, "chrom")?;
+        let pos = req_u64(b, VARIANTS, "pos")?;
+        let ref_a = req_str(b, VARIANTS, "ref_allele")?;
+        let alt_a = req_str(b, VARIANTS, "alt_allele")?;
+        let gt = req_str(b, VARIANTS, "genotype")?;
         for i in 0..b.num_rows() {
-            let gt_s = gt
-                .and_then(|g| (!g.is_null(i)).then(|| g.value(i).to_string()))
-                .unwrap_or_default();
-            // Skip sites where the sample isn't a carrier.
-            if !gt_s.chars().any(|c| c == '1') {
-                continue;
+            let gt_s = opt_string(gt, i);
+            match carrier_state(gt_s.as_deref()) {
+                Carrier::Yes => {}
+                Carrier::No => continue,
+                Carrier::NoCall => {
+                    no_calls += 1;
+                    continue;
+                }
             }
             let key: Key = (
                 normalize_chrom(chrom.value(i)),
@@ -190,84 +227,87 @@ fn build_carrier_map(batches: &[RecordBatch]) -> HashMap<Key, String> {
                 ref_a.value(i).to_string(),
                 alt_a.value(i).to_string(),
             );
-            map.insert(key, gt_s);
+            map.insert(key, gt_s.unwrap_or_default());
         }
     }
-    map
+    Ok((map, no_calls))
 }
 
-/// Render an INFO field value for the given ALT index. If the field is
-/// `Number=A` or `Number=R` we pick the per-alt scalar; otherwise we
-/// emit all values comma-joined. This heuristic works for the common
-/// population-genetics fields (AF, AC, AN) without having to look up
-/// the Number definition in the header.
-fn extract_info(record: &vcf::Record, header: &vcf::Header, field: &str, alt_idx: usize) -> String {
+/// Render an INFO field for the given ALT, using the Number declared in the
+/// header: `A` picks the value for this ALT, `R` picks the value after the
+/// REF value, anything else (`.`, a fixed count, `G`) emits every value.
+/// A per-allele field whose value count does not match the ALT list, or an
+/// element that does not parse, is an error.
+fn extract_info(
+    record: &vcf::Record,
+    header: &vcf::Header,
+    field: &str,
+    alt_idx: usize,
+    alt_count: usize,
+) -> Result<String> {
+    use vcf::header::record::value::map::info::Number;
     use vcf::variant::record::info::field::value::Array;
-    let info = record.info();
-    let Some(Ok(Some(value))) = info.get(header, field) else {
-        return ".".to_string();
+    let bad = |reason: String| -> anyhow::Error {
+        Error::InvalidArgument(format!("INFO/{field}: {reason}")).into()
     };
-    match value {
-        InfoValue::String(s) => s.to_string(),
-        InfoValue::Integer(n) => n.to_string(),
-        InfoValue::Float(f) => f.to_string(),
-        InfoValue::Flag => "1".to_string(),
-        InfoValue::Character(c) => c.to_string(),
+    let info = record.info();
+    let value = match info.get(header, field) {
+        None => return Ok(".".to_string()),
+        Some(r) => r.map_err(|e| bad(e.to_string()))?,
+    };
+    let Some(value) = value else {
+        return Ok(".".to_string());
+    };
+    let vals: Vec<String> = match value {
+        InfoValue::String(s) => vec![s.to_string()],
+        InfoValue::Integer(n) => vec![n.to_string()],
+        InfoValue::Float(f) => vec![f.to_string()],
+        InfoValue::Flag => vec!["1".to_string()],
+        InfoValue::Character(c) => vec![c.to_string()],
         InfoValue::Array(arr) => {
-            let vals: Vec<String> = match arr {
-                Array::Integer(it) => it
-                    .iter()
-                    .filter_map(|r| r.ok())
-                    .map(|o| o.map(|v| v.to_string()).unwrap_or_else(|| ".".into()))
-                    .collect(),
-                Array::Float(it) => it
-                    .iter()
-                    .filter_map(|r| r.ok())
-                    .map(|o| o.map(|v| v.to_string()).unwrap_or_else(|| ".".into()))
-                    .collect(),
-                Array::Character(it) => it
-                    .iter()
-                    .filter_map(|r| r.ok())
-                    .map(|o| o.map(|v| v.to_string()).unwrap_or_else(|| ".".into()))
-                    .collect(),
-                Array::String(it) => it
-                    .iter()
-                    .filter_map(|r| r.ok())
-                    .map(|o| o.map(|v| v.to_string()).unwrap_or_else(|| ".".into()))
-                    .collect(),
-            };
-            if vals.is_empty() {
-                ".".to_string()
-            } else if vals.len() == 1 {
-                vals.into_iter().next().unwrap()
-            } else if alt_idx < vals.len() {
-                // Ambiguous A vs R; per-alt (A-style) is the common case.
-                vals[alt_idx].clone()
-            } else {
-                vals.join(",")
+            fn collect<T: ToString>(
+                it: impl Iterator<Item = std::io::Result<Option<T>>>,
+            ) -> std::io::Result<Vec<String>> {
+                it.map(|r| r.map(|o| o.map(|v| v.to_string()).unwrap_or_else(|| ".".into())))
+                    .collect()
             }
+            let r = match arr {
+                Array::Integer(it) => collect(it.iter()),
+                Array::Float(it) => collect(it.iter()),
+                Array::Character(it) => collect(it.iter()),
+                Array::String(it) => collect(it.iter()),
+            };
+            r.map_err(|e| bad(e.to_string()))?
         }
+    };
+    let number = header.infos().get(field).map(|d| d.number());
+    match number {
+        Some(Number::AlternateBases) => {
+            if vals.len() != alt_count {
+                return Err(bad(format!(
+                    "Number=A but {} value(s) for {alt_count} ALT allele(s)",
+                    vals.len()
+                )));
+            }
+            Ok(vals[alt_idx].clone())
+        }
+        Some(Number::ReferenceAlternateBases) => {
+            if vals.len() != alt_count + 1 {
+                return Err(bad(format!(
+                    "Number=R but {} value(s) for REF plus {alt_count} ALT allele(s)",
+                    vals.len()
+                )));
+            }
+            Ok(vals[alt_idx + 1].clone())
+        }
+        _ => Ok(vals.join(",")),
     }
-}
-
-fn col_str<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a StringArray> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-}
-fn col_u64<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a UInt64Array> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
-}
-fn normalize_chrom(c: &str) -> String {
-    c.strip_prefix("chr").unwrap_or(c).to_string()
-}
-fn sql_escape(s: &str) -> String {
-    s.replace('\'', "''")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::{StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -304,20 +344,9 @@ mod tests {
     }
 
     #[test]
-    fn normalize_chrom_strips_prefix() {
-        assert_eq!(normalize_chrom("chr17"), "17");
-        assert_eq!(normalize_chrom("17"), "17");
-    }
-
-    #[test]
-    fn sql_escape_doubles_single_quotes() {
-        assert_eq!(sql_escape("O'Brien"), "O''Brien");
-    }
-
-    #[test]
     fn build_carrier_map_normalizes_chrom_and_keys_by_variant() {
         let batch = variants_batch(&[("chr17", 100, "A", "T", "0/1")]);
-        let map = build_carrier_map(&[batch]);
+        let (map, _) = build_carrier_map(&[batch]).unwrap();
         assert_eq!(map.len(), 1);
         assert_eq!(
             map.get(&("17".to_string(), 100, "A".to_string(), "T".to_string()))
@@ -333,7 +362,7 @@ mod tests {
             ("1", 200, "C", "G", "0/1"),
             ("1", 300, "G", "A", "./."),
         ]);
-        let map = build_carrier_map(&[batch]);
+        let (map, _) = build_carrier_map(&[batch]).unwrap();
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&("1".to_string(), 200, "C".to_string(), "G".to_string())));
     }

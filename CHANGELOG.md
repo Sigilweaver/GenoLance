@@ -55,6 +55,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allele order, writes `.` for QUAL when samples disagree and for INFO unless
   all samples agree on it and on the ALT list, and uses the union of the
   samples' non-PASS FILTER values.
+- `join`, `screen` and `compound-het` (and `pgx` for FILTER) now:
+  - list only calls that carry the ALT allele; no-call genotypes (`./.`,
+    missing GT) are no longer treated as carriers and are counted;
+  - exclude calls whose FILTER is not PASS and print how many were excluded
+    (`--include-filtered` keeps them); the hit lines of `join` show FILTER;
+  - print `.` instead of `0` for a missing QUAL or DP, and count calls dropped
+    because QUAL/DP is missing under `--min-qual`/`--min-dp`
+    (`--keep-missing` keeps them);
+  - fail on `--significance-exact` or `--genes` that is empty after splitting
+    (it used to match everything);
+  - fail when the clinvar table holds two rows for one variant (two releases
+    ingested by an older version); re-ingest with `--replace`;
+  - fail when a table column is missing or retyped instead of printing zero
+    results.
+- `chrM`, `M` and `MT` match each other in `join`, `screen`, `compound-het`,
+  `pgx`, `annotate` and `query`; `query --chrom` and `annotate --chrom` match
+  both `chr17` and `17`.
+- `compound-het` flags a hemizygous `GT=1` call (chrX in males) like a
+  homozygous one and counts ClinVar hits that have no gene symbol.
+- `compare` counts only calls that carry the ALT; `./.`, `0/.` and haploid `0`
+  are no longer counted as variants, and no-call rows are reported.
+- `pgx --genes` takes a comma-separated list, upper-cases symbols, and errors
+  for a gene with no ClinVar rows.
+- `annotate` reads the declared Number of each INFO field (`A` and `R` pick the
+  value for the ALT; others print all values), errors on a wrong value count or
+  an unparsable element, and scans the whole annotation file instead of
+  stopping at the first record past `--end`.
+- `query --output` accepts only `table` or `json`; anything else is a usage
+  error. JSON is one correctly escaped object per line with `null` for a
+  missing genotype (it used to break on quotes and print `""` for null).
+  `--output arrow` is removed: it printed a summary, not Arrow.
+- `query --gene` matches case-insensitively and fails when ClinVar has no rows
+  for the symbol (it used to print "no positions matched" and exit 0).
+- `join` never ignores the file it is given: with a ClinVar release already in
+  the store, `--against FILE` is an error that points at `ingest --replace`;
+  without `--against` and without a release it is an error too.
+- `annotate` checks its annotation file for truncation and compression like
+  `ingest`, fails for an unregistered sample, and fails for an `--info` key the
+  annotation header does not declare. `compare` fails for an unregistered
+  sample or an unknown `--mode` before reading data. An empty `--significance`
+  is an error.
 
 ### API breaks
 
@@ -63,6 +104,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IngestReport` and `genolance_core::Error` (all `#[non_exhaustive]`);
   rejected input surfaces as `genolance_core::Error` inside the
   `anyhow::Error`.
+- `join::Filters`, `screen::Filters` and `compound::Filters` are one
+  `filters::Filters` (`#[non_exhaustive]`, new `include_filtered` and
+  `keep_missing`). `pgx::run` takes a `&Filters`. `query::run` takes an
+  `OutputFormat` instead of a string; `join::run` takes the ClinVar file as an
+  `Option`.
 
 ### Security
 

@@ -64,9 +64,9 @@ enum Commands {
         #[arg(long)]
         end: Option<u64>,
 
-        /// Output format: table | json | arrow
-        #[arg(long, default_value = "table")]
-        output: String,
+        /// Output format: table | json
+        #[arg(long, default_value = "table", value_parser = clap::value_parser!(genolance_variants::query::OutputFormat))]
+        output: genolance_variants::query::OutputFormat,
     },
 
     /// Annotate variants by joining against a reference VCF (e.g. ClinVar)
@@ -75,9 +75,11 @@ enum Commands {
         #[arg(short, long)]
         store: String,
 
-        /// Annotation VCF/BCF to join against (e.g. clinvar.vcf.gz)
+        /// ClinVar VCF to load when the store has no ClinVar table yet. Not
+        /// allowed when the store already holds a release (use
+        /// `ingest --replace` to load a new one).
         #[arg(long)]
-        against: String,
+        against: Option<String>,
 
         /// Filter by clinical_significance as a case-insensitive substring
         /// (e.g. "pathogenic" also matches "Likely_pathogenic" and "Conflicting...").
@@ -104,6 +106,15 @@ enum Commands {
         /// Restrict to a comma-separated gene list
         #[arg(long = "genes")]
         gene_filter: Option<String>,
+
+        /// Include calls whose FILTER is not PASS (excluded and counted by default)
+        #[arg(long = "include-filtered")]
+        include_filtered: bool,
+
+        /// Keep calls with missing QUAL/DP when --min-qual/--min-dp is set
+        /// (excluded and counted by default)
+        #[arg(long = "keep-missing")]
+        keep_missing: bool,
     },
 
     /// Combined carrier-screen + ClinVar pathogenicity filter across N samples.
@@ -144,6 +155,15 @@ enum Commands {
         /// Restrict to a comma-separated gene list
         #[arg(long = "genes")]
         gene_filter: Option<String>,
+
+        /// Include calls whose FILTER is not PASS (excluded and counted by default)
+        #[arg(long = "include-filtered")]
+        include_filtered: bool,
+
+        /// Keep calls with missing QUAL/DP when --min-qual/--min-dp is set
+        /// (excluded and counted by default)
+        #[arg(long = "keep-missing")]
+        keep_missing: bool,
     },
 
     /// Flag genes where a single sample carries two or more P/LP heterozygous
@@ -181,6 +201,15 @@ enum Commands {
         /// Restrict to a comma-separated gene list
         #[arg(long = "genes")]
         gene_filter: Option<String>,
+
+        /// Include calls whose FILTER is not PASS (excluded and counted by default)
+        #[arg(long = "include-filtered")]
+        include_filtered: bool,
+
+        /// Keep calls with missing QUAL/DP when --min-qual/--min-dp is set
+        /// (excluded and counted by default)
+        #[arg(long = "keep-missing")]
+        keep_missing: bool,
     },
 
     /// Annotate a sample's variants with arbitrary INFO fields from any VCF.
@@ -227,9 +256,13 @@ enum Commands {
         #[arg(long)]
         sample: String,
 
-        /// Additional gene symbols beyond the default PGx list
-        #[arg(long)]
+        /// Additional gene symbols beyond the default PGx list (comma-separated)
+        #[arg(long, value_delimiter = ',')]
         genes: Vec<String>,
+
+        /// Include calls whose FILTER is not PASS (excluded and counted by default)
+        #[arg(long = "include-filtered")]
+        include_filtered: bool,
     },
 
     /// Export variants for a sample back to VCF (reconstructs original header).
@@ -290,6 +323,8 @@ enum Commands {
     },
 }
 
+// `Filters` is non-exhaustive, so it is built field by field from its default.
+#[allow(clippy::field_reassign_with_default)]
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -328,7 +363,7 @@ async fn main() -> Result<()> {
                 chrom.as_deref(),
                 start,
                 end,
-                &output,
+                output,
             )
             .await?;
         }
@@ -341,20 +376,23 @@ async fn main() -> Result<()> {
             min_dp,
             acmg,
             gene_filter,
+            include_filtered,
+            keep_missing,
         } => {
-            let f = genolance_variants::join::Filters {
-                significance_substring: significance,
-                significance_exact: significance_exact
-                    .as_deref()
-                    .map(genolance_core::gene_lists::parse_significance_list),
-                min_qual,
-                min_dp,
-                acmg_only: acmg,
-                gene_filter: gene_filter
-                    .as_deref()
-                    .map(genolance_core::gene_lists::parse_gene_list),
-            };
-            genolance_variants::join::run(&store, &against, &f).await?;
+            let mut f = genolance_variants::filters::Filters::default();
+            f.significance_substring = significance;
+            f.significance_exact = significance_exact
+                .as_deref()
+                .map(genolance_core::gene_lists::parse_significance_list);
+            f.min_qual = min_qual;
+            f.min_dp = min_dp;
+            f.acmg_only = acmg;
+            f.gene_filter = gene_filter
+                .as_deref()
+                .map(genolance_core::gene_lists::parse_gene_list);
+            f.include_filtered = include_filtered;
+            f.keep_missing = keep_missing;
+            genolance_variants::join::run(&store, against.as_deref(), &f).await?;
         }
         Commands::Screen {
             store,
@@ -365,19 +403,22 @@ async fn main() -> Result<()> {
             min_dp,
             acmg,
             gene_filter,
+            include_filtered,
+            keep_missing,
         } => {
-            let f = genolance_variants::screen::Filters {
-                significance_substring: significance,
-                significance_exact: significance_exact
-                    .as_deref()
-                    .map(genolance_core::gene_lists::parse_significance_list),
-                min_qual,
-                min_dp,
-                acmg_only: acmg,
-                gene_filter: gene_filter
-                    .as_deref()
-                    .map(genolance_core::gene_lists::parse_gene_list),
-            };
+            let mut f = genolance_variants::filters::Filters::default();
+            f.significance_substring = significance;
+            f.significance_exact = significance_exact
+                .as_deref()
+                .map(genolance_core::gene_lists::parse_significance_list);
+            f.min_qual = min_qual;
+            f.min_dp = min_dp;
+            f.acmg_only = acmg;
+            f.gene_filter = gene_filter
+                .as_deref()
+                .map(genolance_core::gene_lists::parse_gene_list);
+            f.include_filtered = include_filtered;
+            f.keep_missing = keep_missing;
             genolance_variants::screen::run(&store, &samples, &f).await?;
         }
         Commands::CompoundHet {
@@ -389,19 +430,22 @@ async fn main() -> Result<()> {
             min_dp,
             acmg,
             gene_filter,
+            include_filtered,
+            keep_missing,
         } => {
-            let f = genolance_variants::compound::Filters {
-                significance_substring: significance,
-                significance_exact: significance_exact
-                    .as_deref()
-                    .map(genolance_core::gene_lists::parse_significance_list),
-                min_qual,
-                min_dp,
-                acmg_only: acmg,
-                gene_filter: gene_filter
-                    .as_deref()
-                    .map(genolance_core::gene_lists::parse_gene_list),
-            };
+            let mut f = genolance_variants::filters::Filters::default();
+            f.significance_substring = significance;
+            f.significance_exact = significance_exact
+                .as_deref()
+                .map(genolance_core::gene_lists::parse_significance_list);
+            f.min_qual = min_qual;
+            f.min_dp = min_dp;
+            f.acmg_only = acmg;
+            f.gene_filter = gene_filter
+                .as_deref()
+                .map(genolance_core::gene_lists::parse_gene_list);
+            f.include_filtered = include_filtered;
+            f.keep_missing = keep_missing;
             genolance_variants::compound::run(&store, &sample, &f).await?;
         }
         Commands::Export {
@@ -463,8 +507,11 @@ async fn main() -> Result<()> {
             store,
             sample,
             genes,
+            include_filtered,
         } => {
-            genolance_variants::pgx::run(&store, &sample, &genes).await?;
+            let mut f = genolance_variants::filters::Filters::default();
+            f.include_filtered = include_filtered;
+            genolance_variants::pgx::run(&store, &sample, &genes, &f).await?;
         }
         Commands::Index { store } => {
             genolance_variants::index::run(&store).await?;

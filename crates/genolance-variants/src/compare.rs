@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
-use arrow_array::{Array, RecordBatch, StringArray, UInt64Array};
+use arrow_array::RecordBatch;
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
 use genolance_core::schema::VARIANTS_TABLE;
 use genolance_core::store::Store;
+
+use crate::common::{carrier_state, opt_string, req_str, req_u64, require_samples, Carrier};
 
 type Key = (String, u64, String, String);
 
@@ -15,8 +17,14 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
     if samples.len() < 2 {
         return Err(anyhow!("compare needs at least 2 samples"));
     }
+    if !matches!(mode, "concordance" | "carrier-screen" | "private") {
+        return Err(anyhow!(
+            "unknown compare mode: {mode} (expected concordance, carrier-screen or private)"
+        ));
+    }
 
     let store = Store::open(store_path).await?;
+    require_samples(&store, samples).await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!(
@@ -39,28 +47,28 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
         .try_collect()
         .await?;
 
-    // Index: variant key -> map of sample_name -> genotype
+    // Index: variant key -> map of sample_name -> genotype. Only carriers
+    // are indexed; no-calls are unknown, not variants, and are counted.
     let mut index: HashMap<Key, HashMap<String, String>> = HashMap::new();
+    let mut no_calls: HashMap<String, usize> = HashMap::new();
     for b in &batches {
-        let sample = col_str(b, "sample_name");
-        let chrom = col_str(b, "chrom");
-        let pos = col_u64(b, "pos");
-        let ref_a = col_str(b, "ref_allele");
-        let alt_a = col_str(b, "alt_allele");
-        let gt = col_str(b, "genotype");
-        let (Some(sample), Some(chrom), Some(pos), Some(ref_a), Some(alt_a)) =
-            (sample, chrom, pos, ref_a, alt_a)
-        else {
-            continue;
-        };
+        let t = VARIANTS_TABLE;
+        let sample = req_str(b, t, "sample_name")?;
+        let chrom = req_str(b, t, "chrom")?;
+        let pos = req_u64(b, t, "pos")?;
+        let ref_a = req_str(b, t, "ref_allele")?;
+        let alt_a = req_str(b, t, "alt_allele")?;
+        let gt = req_str(b, t, "genotype")?;
         for i in 0..b.num_rows() {
             let s = sample.value(i).to_string();
-            let g = gt
-                .and_then(|g| (!g.is_null(i)).then(|| g.value(i).to_string()))
-                .unwrap_or_else(|| "./.".to_string());
-            // Skip homozygous-reference calls - they're not really variants.
-            if g == "0/0" || g == "0|0" {
-                continue;
+            let g = opt_string(gt, i);
+            match carrier_state(g.as_deref()) {
+                Carrier::Yes => {}
+                Carrier::No => continue,
+                Carrier::NoCall => {
+                    *no_calls.entry(s).or_insert(0) += 1;
+                    continue;
+                }
             }
             let key: Key = (
                 chrom.value(i).to_string(),
@@ -68,7 +76,10 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
                 ref_a.value(i).to_string(),
                 alt_a.value(i).to_string(),
             );
-            index.entry(key).or_default().insert(s, g);
+            index
+                .entry(key)
+                .or_default()
+                .insert(s, g.unwrap_or_default());
         }
     }
 
@@ -79,6 +90,11 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
         "carrier-screen" => print_carrier_screen(&index, &all_samples, samples),
         "private" => print_private(&index, samples),
         other => return Err(anyhow!("unknown compare mode: {other}")),
+    }
+    for s in samples {
+        if let Some(n) = no_calls.get(s) {
+            eprintln!("[compare] {n} no-call genotype row(s) for {s} were not counted as variants");
+        }
     }
     Ok(())
 }
@@ -210,15 +226,6 @@ fn print_private(index: &HashMap<Key, HashMap<String, String>>, samples: &[Strin
             }
         }
     }
-}
-
-fn col_str<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a StringArray> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-}
-fn col_u64<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a UInt64Array> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
 }
 
 fn truncate(s: &str, n: usize) -> String {

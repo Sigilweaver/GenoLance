@@ -84,7 +84,9 @@ genolance query -s $STORE --chrom chr17 --start 43044000 --end 43125000
 # Gene query (uses ClinVar position index)
 genolance query -s $STORE --gene BRCA1
 
-# ClinVar join, only likely-/pathogenic calls the sample actually carries
+# ClinVar join: calls the sample carries whose significance contains "pathogenic"
+# (this also matches Conflicting_classifications_of_pathogenicity). Calls with
+# FILTER other than PASS are excluded and counted; --include-filtered keeps them.
 genolance join -s $STORE --significance pathogenic
 
 # Stricter: exact significance match + quality gates + ACMG SF v3 gene list
