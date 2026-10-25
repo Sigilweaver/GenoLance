@@ -322,7 +322,7 @@ fn records_at_site<'a>(site: &[&'a Row]) -> Result<Vec<Vec<&'a Row>>> {
         records.push(sorted);
     }
     for rec in &records {
-        check_record_consistent(rec).map_err(|why| ambiguous(why))?;
+        check_record_consistent(rec).map_err(ambiguous)?;
     }
     Ok(records)
 }
@@ -763,8 +763,10 @@ async fn write_merge_header<W: Write>(w: &mut W, store: &Store, samples: &[Strin
     Ok(())
 }
 
+type SiteKey = (String, u64, String);
+
 fn merged_site_line(
-    per_sample: &[BTreeMap<(String, u64, String), Vec<Row>>],
+    per_sample: &[BTreeMap<SiteKey, Vec<Row>>],
     key: &(String, u64, String),
 ) -> Result<Option<String>> {
     let mut present: Vec<Vec<&Row>> = Vec::new();
