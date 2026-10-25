@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{anyhow, Result};
 use arrow_array::RecordBatch;
 use futures::TryStreamExt;
+use genolance_core::Result;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
 use genolance_core::schema::VARIANTS_TABLE;
@@ -15,10 +15,10 @@ type Key = (String, u64, String, String);
 /// Compare variants across two or more samples.
 pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()> {
     if samples.len() < 2 {
-        return Err(anyhow!("compare needs at least 2 samples"));
+        return Err(invalid!("compare needs at least 2 samples"));
     }
     if !matches!(mode, "concordance" | "carrier-screen" | "private") {
-        return Err(anyhow!(
+        return Err(invalid!(
             "unknown compare mode: {mode} (expected concordance, carrier-screen or private)"
         ));
     }
@@ -27,7 +27,7 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
     require_samples(&store, samples).await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
-        return Err(anyhow!(
+        return Err(invalid!(
             "store has no '{VARIANTS_TABLE}' table; ingest samples first"
         ));
     }
@@ -89,7 +89,7 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
         "concordance" => print_concordance(&index, samples),
         "carrier-screen" => print_carrier_screen(&index, &all_samples, samples),
         "private" => print_private(&index, samples),
-        other => return Err(anyhow!("unknown compare mode: {other}")),
+        other => return Err(invalid!("unknown compare mode: {other}")),
     }
     for s in samples {
         if let Some(n) = no_calls.get(s) {

@@ -2183,7 +2183,6 @@ dependencies = [
 name = "genolance-cli"
 version = "0.2.0"
 dependencies = [
- "anyhow",
  "clap",
  "genolance-core",
  "genolance-variants",
@@ -2194,7 +2193,6 @@ dependencies = [
 name = "genolance-core"
 version = "0.2.0"
 dependencies = [
- "anyhow",
  "arrow-array",
  "arrow-schema",
  "chrono",
@@ -2208,7 +2206,6 @@ dependencies = [
 name = "genolance-variants"
 version = "0.2.0"
 dependencies = [
- "anyhow",
  "arrow-array",
  "arrow-schema",
  "chrono",

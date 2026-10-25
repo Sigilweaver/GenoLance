@@ -13,6 +13,12 @@ variants can be queried, joined against ClinVar, and compared across
 samples entirely out of a single process - no Spark, no cloud, no
 GenomicsDB.
 
+## Exit codes
+
+`0` success; `1` internal, I/O or storage error; `2` usage error or a request that
+cannot be honoured as written; `3` input data or store contents rejected;
+`4` store format version not supported.
+
 ## Status
 
 Validated against real DeepVariant WGS data (GRCh37, ~5.8M sites per

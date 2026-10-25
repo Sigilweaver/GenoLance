@@ -9,9 +9,9 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Result};
 use arrow_array::{Array, RecordBatch};
 use futures::TryStreamExt;
+use genolance_core::Result;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
 use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
@@ -45,10 +45,10 @@ pub async fn run(store_path: &str, sample: &str, f: &Filters) -> Result<()> {
     let store = Store::open(store_path).await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
-        return Err(anyhow!("store has no '{VARIANTS_TABLE}' table"));
+        return Err(invalid!("store has no '{VARIANTS_TABLE}' table"));
     }
     if !tables.iter().any(|n| n == CLINVAR_TABLE) {
-        return Err(anyhow!("store has no '{CLINVAR_TABLE}' table"));
+        return Err(invalid!("store has no '{CLINVAR_TABLE}' table"));
     }
 
     // 1. Build ClinVar lookup with the requested filter.

@@ -22,6 +22,5 @@ arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
 futures      = { workspace = true }
 tokio        = { workspace = true }
-anyhow       = { workspace = true }
 thiserror    = { workspace = true }
 chrono       = { workspace = true }

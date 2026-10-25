@@ -73,15 +73,14 @@ pub fn write_bgzf(path: &str, bytes: &[u8]) {
     w.finish().unwrap();
 }
 
-pub async fn ingest_file(store: &str, file: &str) -> anyhow::Result<()> {
+pub async fn ingest_file(store: &str, file: &str) -> genolance_core::Result<()> {
     ingest::run(store, &[file.to_string()], &IngestOptions::new())
         .await
         .map(|_| ())
 }
 
-pub fn ingest_error(e: &anyhow::Error) -> &Error {
-    e.downcast_ref::<Error>()
-        .unwrap_or_else(|| panic!("not an IngestError: {e:#}"))
+pub fn ingest_error(e: &Error) -> &Error {
+    e.root()
 }
 
 async fn open(store: &str, sub: &str, table: &str) -> Option<lancedb::Table> {

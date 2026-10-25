@@ -25,7 +25,6 @@ arrow-schema = { workspace = true }
 futures      = { workspace = true }
 tokio        = { workspace = true }
 rayon        = { workspace = true }
-anyhow       = { workspace = true }
 thiserror    = { workspace = true }
 indicatif    = { workspace = true }
 serde_json   = { workspace = true }

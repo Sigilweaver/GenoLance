@@ -1,4 +1,3 @@
-use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -323,12 +322,21 @@ enum Commands {
     },
 }
 
+/// Exit codes: 0 success; 1 internal, I/O or storage error; 2 usage error or a
+/// request that cannot be honoured as written; 3 input data or store contents
+/// rejected; 4 store format version or layout not supported.
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+    if let Err(e) = run(cli).await {
+        eprintln!("Error: {e}");
+        std::process::exit(e.exit_code());
+    }
+}
+
 // `Filters` is non-exhaustive, so it is built field by field from its default.
 #[allow(clippy::field_reassign_with_default)]
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-
+async fn run(cli: Cli) -> genolance_core::Result<()> {
     match cli.command {
         Commands::Ingest {
             store,
@@ -468,10 +476,9 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             } else {
-                let s = sample
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--sample is required"))?;
+                let s = sample.into_iter().next().ok_or_else(|| {
+                    genolance_core::Error::InvalidArgument("--sample is required".into())
+                })?;
                 genolance_variants::export::run(
                     &store,
                     &s,

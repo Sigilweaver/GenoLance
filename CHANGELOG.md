@@ -97,6 +97,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sample or an unknown `--mode` before reading data. An empty `--significance`
   is an error.
 
+- The command-line tool exits with 1 for internal, I/O or storage errors, 2 for
+  usage errors or a request that cannot be honoured as written, 3 when input
+  data or store contents are rejected, and 4 when the store format version is
+  not supported.
+
 ### API breaks
 
 - `ingest::run` takes `&IngestOptions` instead of `Option<&str>` and returns
@@ -104,6 +109,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IngestReport` and `genolance_core::Error` (all `#[non_exhaustive]`);
   rejected input surfaces as `genolance_core::Error` inside the
   `anyhow::Error`.
+- Library functions return `genolance_core::Result<T>` (`genolance_core::Error`,
+  `#[non_exhaustive]`) instead of `anyhow::Result<T>`. Added
+  `Error::root`, `Error::context`, `Error::exit_code` and the `ResultExt`
+  trait; `anyhow` is no longer a dependency.
 - `join::Filters`, `screen::Filters` and `compound::Filters` are one
   `filters::Filters` (`#[non_exhaustive]`, new `include_filtered` and
   `keep_missing`). `pgx::run` takes a `&Filters`. `query::run` takes an

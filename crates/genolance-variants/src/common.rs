@@ -3,13 +3,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
 use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
 use futures::TryStreamExt;
 use genolance_core::gene_lists::{gene_in_set, ACMG_SF_V3};
 use genolance_core::schema::{CLINVAR_TABLE, SAMPLES_TABLE};
 use genolance_core::store::Store;
-use genolance_core::Error;
+use genolance_core::{Error, Result};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
 use crate::filters::Filters;
@@ -113,8 +112,7 @@ pub(crate) async fn require_samples(store: &Store, names: &[String]) -> Result<(
             return Err(Error::UnknownSample {
                 name: n.clone(),
                 available,
-            }
-            .into());
+            });
         }
     }
     Ok(())
@@ -128,11 +126,10 @@ pub(crate) fn fmt_dp(d: Option<u32>) -> String {
     d.map(|v| v.to_string()).unwrap_or_else(|| ".".into())
 }
 
-fn missing_column(table: &str, column: &str) -> anyhow::Error {
+fn missing_column(table: &str, column: &str) -> Error {
     Error::InvalidArgument(format!(
         "table '{table}' has no column '{column}' of the expected type; the store was written by an incompatible version"
     ))
-    .into()
 }
 
 /// Required columns: absent or retyped columns are errors, not empty output.
@@ -196,8 +193,7 @@ pub(crate) async fn ensure_clinvar_unique(table: &lancedb::Table) -> Result<()> 
                 return Err(Error::InvalidArgument(format!(
                     "the clinvar table has more than one row for {}:{} {}>{}; it holds more than one release. Re-ingest ClinVar with --replace",
                     key.0, key.1, key.2, key.3
-                ))
-                .into());
+                )));
             }
         }
     }
@@ -214,8 +210,7 @@ pub(crate) fn significance_predicate(
         if list.is_empty() {
             return Err(Error::InvalidArgument(
                 "--significance-exact has no values; refusing to match everything".into(),
-            )
-            .into());
+            ));
         }
         let ors: Vec<String> = list
             .iter()
@@ -290,8 +285,7 @@ pub(crate) fn build_clinvar_map(
                     return Err(Error::InvalidArgument(format!(
                         "ClinVar has two rows for {}:{} {}>{} with different significance ({:?} and {:?}); the store holds more than one release. Re-ingest with --replace",
                         key.0, key.1, key.2, key.3, prev.clinical_significance, ann.clinical_significance
-                    ))
-                    .into());
+                    )));
                 }
                 continue;
             }
@@ -308,8 +302,7 @@ pub(crate) fn validate_filters(f: &Filters) -> Result<()> {
         if list.is_empty() {
             return Err(Error::InvalidArgument(
                 "--significance-exact has no values after splitting; refusing to treat it as match-all".into(),
-            )
-            .into());
+            ));
         }
     }
     if f.significance_substring
@@ -318,15 +311,13 @@ pub(crate) fn validate_filters(f: &Filters) -> Result<()> {
     {
         return Err(Error::InvalidArgument(
             "--significance is empty; an empty substring would match every record".into(),
-        )
-        .into());
+        ));
     }
     if let Some(list) = &f.gene_filter {
         if list.is_empty() {
             return Err(Error::InvalidArgument(
                 "--genes has no values after splitting; refusing to treat it as match-none or match-all".into(),
-            )
-            .into());
+            ));
         }
     }
     Ok(())
