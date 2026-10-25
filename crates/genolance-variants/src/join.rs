@@ -38,7 +38,7 @@ pub async fn run(store_path: &str, annotation_vcf: &str, f: &Filters) -> Result<
         crate::ingest::run(
             store_path,
             std::slice::from_ref(&annotation_vcf.to_string()),
-            None,
+            &crate::ingest::IngestOptions::new().with_clinvar(true),
         )
         .await?;
     }

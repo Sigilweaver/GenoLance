@@ -1,6 +1,7 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -14,9 +15,10 @@ use lancedb::Table;
 use noodles::bgzf;
 use noodles::vcf::{
     self as vcf,
+    header::record::value::map::info::Number as InfoNumber,
     variant::record::{
-        samples::{series::Value as SampleValue, Sample as SampleTrait},
-        AlternateBases, Filters as FiltersTrait, Ids as IdsTrait, Info as InfoTrait,
+        samples::series::Value as SampleValue, AlternateBases, Filters as FiltersTrait,
+        Ids as IdsTrait,
     },
 };
 use tokio::sync::mpsc;
@@ -25,55 +27,336 @@ use genolance_core::schema::{
     clinvar_schema, samples_schema, variant_schema, CLINVAR_TABLE, SAMPLES_TABLE, VARIANTS_TABLE,
 };
 use genolance_core::store::Store;
+use genolance_core::Error;
 
 /// Number of rows to buffer before flushing a batch to the Lance table.
 const BATCH_SIZE: usize = 10_000;
 
-/// Ingest one or more VCF/BCF files into the GenoLance store at `store_path`.
-///
-/// Files whose filename contains "clinvar" or that have no sample columns
-/// are ingested into the `clinvar` annotation table. All others are ingested
-/// into the `variants` table, one row per (sample, chrom, pos, ref, alt).
-pub async fn run(store_path: &str, files: &[String], sample_override: Option<&str>) -> Result<()> {
-    let store = Store::open(store_path).await?;
+/// The 28-byte BGZF end-of-file marker block (an empty BGZF block).
+/// Source: SAM/BAM specification (hts-specs, SAMv1.pdf), section 4.1.2
+/// "End-of-file marker".
+const BGZF_EOF: [u8; 28] = [
+    0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43, 0x02, 0x00,
+    0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
 
-    for file in files {
-        ingest_one(&store, file, sample_override).await?;
-    }
-    Ok(())
+/// Options for [`run`]. Build with [`IngestOptions::new`] and the
+/// `with_*` methods; new options can be added without breaking callers.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct IngestOptions {
+    /// Name to store the sample under instead of the VCF header's name.
+    /// Only valid when ingesting a single file.
+    pub sample_override: Option<String>,
+    /// Which sample column to ingest from a multi-sample VCF.
+    pub sample_column: Option<String>,
+    /// Replace a sample (or the ClinVar release) that is already stored.
+    pub replace: bool,
+    /// Ingest as a ClinVar release even if the header has no INFO/CLNSIG.
+    pub clinvar: bool,
 }
 
-async fn ingest_one(store: &Store, path: &str, sample_override: Option<&str>) -> Result<()> {
+impl IngestOptions {
+    /// Strict defaults: no renaming, one-sample VCFs only, no replacing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_sample_override(mut self, name: impl Into<String>) -> Self {
+        self.sample_override = Some(name.into());
+        self
+    }
+    pub fn with_sample_column(mut self, name: impl Into<String>) -> Self {
+        self.sample_column = Some(name.into());
+        self
+    }
+    pub fn with_replace(mut self, replace: bool) -> Self {
+        self.replace = replace;
+        self
+    }
+    pub fn with_clinvar(mut self, clinvar: bool) -> Self {
+        self.clinvar = clinvar;
+        self
+    }
+}
+
+/// What an ingest run did. Counts of everything it did not store are here,
+/// so a skipped record is never invisible.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IngestReport {
+    /// Files fully ingested.
+    pub files: usize,
+    /// Rows written (one per sample and ALT allele, or per ClinVar ALT).
+    pub rows: u64,
+    /// Records skipped because POS is 0.
+    pub skipped_no_position: u64,
+    /// Records skipped because ALT is `.` (reference-only sites).
+    pub skipped_no_alt: u64,
+}
+
+impl IngestReport {
+    fn add(&mut self, other: &IngestReport) {
+        self.files += other.files;
+        self.rows += other.rows;
+        self.skipped_no_position += other.skipped_no_position;
+        self.skipped_no_alt += other.skipped_no_alt;
+    }
+}
+
+/// Ingest one or more VCF files into the GenoLance store at `store_path`.
+///
+/// A file with a ClinVar header (INFO/CLNSIG), or any file when
+/// `opts.clinvar` is set, is ingested into the `clinvar` annotation table.
+/// Other files must have sample columns and are ingested into the
+/// `variants` table, one row per (sample, chrom, pos, ref, alt).
+///
+/// Each file is all-or-nothing: if it fails part-way, the rows it wrote are
+/// removed before the error is returned.
+pub async fn run(store_path: &str, files: &[String], opts: &IngestOptions) -> Result<IngestReport> {
+    if opts.sample_override.is_some() && files.len() > 1 {
+        return Err(Error::InvalidArgument(format!(
+            "--sample renames one sample, but {} files were given; ingest the files one at a time",
+            files.len()
+        ))
+        .into());
+    }
+    let store = Store::open(store_path).await?;
+
+    let mut report = IngestReport::default();
+    for file in files {
+        report.add(&ingest_one(&store, file, opts).await?);
+    }
+    Ok(report)
+}
+
+async fn ingest_one(store: &Store, path: &str, opts: &IngestOptions) -> Result<IngestReport> {
     let filename = Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(path);
     println!("[ingest] {filename}");
 
-    let mut reader = open_vcf_reader(path).with_context(|| format!("opening {path}"))?;
+    let (mut reader, tail) = open_vcf_reader(path).with_context(|| format!("opening {path}"))?;
     let header = reader
         .read_header()
         .with_context(|| format!("reading VCF header of {path}"))?;
 
-    let looks_like_clinvar = filename.to_lowercase().contains("clinvar");
-    let has_samples = !header.sample_names().is_empty();
-
-    if looks_like_clinvar || !has_samples {
-        ingest_clinvar(&store.variants, &mut reader, &header).await
+    let n_samples = header.sample_names().len();
+    let is_clinvar = if opts.clinvar {
+        if n_samples > 0 {
+            return Err(Error::InvalidArgument(format!(
+                "{path}: --clinvar was given but the VCF has {n_samples} sample column(s); a ClinVar release has none"
+            ))
+            .into());
+        }
+        true
+    } else if n_samples == 0 {
+        if header.infos().contains_key("CLNSIG") {
+            true
+        } else {
+            return Err(Error::UnrecognizedInput {
+                path: path.to_string(),
+                reason: "VCF has no sample columns and no INFO/CLNSIG definition, so it is not recognised as ClinVar; pass --clinvar to ingest it as a ClinVar release".into(),
+            }
+            .into());
+        }
     } else {
-        let sample_name = sample_override
-            .map(str::to_owned)
-            .or_else(|| header.sample_names().iter().next().cloned())
-            .or_else(|| {
-                Path::new(path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(String::from)
-            })
-            .ok_or_else(|| anyhow!("could not determine sample name for {path}"))?;
+        false
+    };
 
-        register_sample(&store.conn, &sample_name, path, &header).await?;
-        ingest_variants(&store.variants, &mut reader, &header, &sample_name).await
+    if is_clinvar {
+        let table = open_or_create(&store.variants, CLINVAR_TABLE, clinvar_schema()).await?;
+        prepare_clinvar_table(&table, opts.replace).await?;
+        let result = ingest_clinvar(&table, &mut reader, &header, path)
+            .await
+            .and_then(|r| tail.check_complete(path).map(|()| r));
+        match result {
+            Ok(report) => Ok(report),
+            Err(e) => Err(rollback(delete_all(&table).await, e, "clinvar")),
+        }
+    } else {
+        let col_idx = select_sample_column(path, &header, opts)?;
+        let file_sample_name = header
+            .sample_names()
+            .get_index(col_idx)
+            .cloned()
+            .ok_or_else(|| anyhow!("{path}: sample column {col_idx} not in header"))?;
+        let sample_name = opts.sample_override.clone().unwrap_or(file_sample_name);
+
+        let table = open_or_create(&store.variants, VARIANTS_TABLE, variant_schema()).await?;
+        prepare_sample(store, &table, &sample_name, opts.replace).await?;
+
+        let result = ingest_variants(&table, &mut reader, &header, &sample_name, col_idx, path)
+            .await
+            .and_then(|r| tail.check_complete(path).map(|()| r));
+        let result = match result {
+            Ok(r) => register_sample(&store.conn, &sample_name, path, &header)
+                .await
+                .map(|()| r),
+            Err(e) => Err(e),
+        };
+        let report = match result {
+            Ok(r) => r,
+            Err(e) => {
+                let pred = format!("sample_name = '{}'", sql_escape(&sample_name));
+                let cleanup = table
+                    .delete(&pred)
+                    .await
+                    .map(|_| ())
+                    .map_err(anyhow::Error::from);
+                return Err(rollback(cleanup, e, &sample_name));
+            }
+        };
+        ensure_variant_indices(&table).await?;
+        Ok(report)
+    }
+}
+
+/// Combine an ingest error with the outcome of removing its partial rows.
+/// A failed cleanup is reported, never dropped.
+fn rollback(cleanup: Result<()>, err: anyhow::Error, what: &str) -> anyhow::Error {
+    match cleanup {
+        Ok(()) => err.context(format!(
+            "ingest of {what} failed; the rows it wrote were removed"
+        )),
+        Err(c) => err.context(format!(
+            "ingest of {what} failed AND removing its partial rows also failed ({c:#}); the store may hold partial data for {what}"
+        )),
+    }
+}
+
+async fn delete_all(table: &Table) -> Result<()> {
+    table.delete("pos >= 0").await?;
+    Ok(())
+}
+
+fn sql_escape(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Choose the sample column to ingest. A multi-sample VCF needs an explicit
+/// `--sample-column`; nothing is dropped silently.
+fn select_sample_column(path: &str, header: &vcf::Header, opts: &IngestOptions) -> Result<usize> {
+    let names = header.sample_names();
+    match &opts.sample_column {
+        Some(want) => names.get_index_of(want.as_str()).ok_or_else(|| {
+            Error::UnknownSample {
+                name: want.clone(),
+                available: names.iter().cloned().collect(),
+            }
+            .into()
+        }),
+        None if names.len() == 1 => Ok(0),
+        None => Err(Error::MultiSample {
+            path: path.to_string(),
+            samples: names.iter().cloned().collect(),
+        }
+        .into()),
+    }
+}
+
+async fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn
+        .table_names()
+        .execute()
+        .await?
+        .iter()
+        .any(|n| n == name))
+}
+
+/// Refuse to add a sample that is already stored (or that has rows left by
+/// an interrupted ingest). With `replace`, remove the old rows first.
+async fn prepare_sample(
+    store: &Store,
+    calls: &Table,
+    sample_name: &str,
+    replace: bool,
+) -> Result<()> {
+    let pred = format!("sample_name = '{}'", sql_escape(sample_name));
+    let mut exists = calls.count_rows(Some(pred.clone())).await? > 0;
+    let have_registry = table_exists(&store.conn, SAMPLES_TABLE).await?;
+    let registry = if have_registry {
+        Some(store.conn.open_table(SAMPLES_TABLE).execute().await?)
+    } else {
+        None
+    };
+    if let Some(reg) = &registry {
+        exists |= reg.count_rows(Some(pred.clone())).await? > 0;
+    }
+    if !exists {
+        return Ok(());
+    }
+    if !replace {
+        return Err(Error::DuplicateSample {
+            sample: sample_name.to_string(),
+        }
+        .into());
+    }
+    calls.delete(&pred).await?;
+    if let Some(reg) = registry {
+        reg.delete(&pred).await?;
+    }
+    Ok(())
+}
+
+async fn prepare_clinvar_table(table: &Table, replace: bool) -> Result<()> {
+    let existing = table.count_rows(None).await?;
+    if existing == 0 {
+        return Ok(());
+    }
+    if !replace {
+        return Err(Error::ClinVarReleasePresent { existing }.into());
+    }
+    delete_all(table).await
+}
+
+/// Remembers the last byte handed to the VCF parser, so a file that stops
+/// mid-line is detected after parsing.
+struct TailCheck(Arc<AtomicU16>);
+
+const NO_BYTE: u16 = 256;
+
+impl TailCheck {
+    fn check_complete(&self, path: &str) -> Result<()> {
+        match self.0.load(Ordering::SeqCst) {
+            b if b == u16::from(b'\n') => Ok(()),
+            _ => Err(Error::Truncated {
+                path: path.to_string(),
+                detail: "the last line has no terminating newline".into(),
+            }
+            .into()),
+        }
+    }
+}
+
+struct TrackingReader<R> {
+    inner: R,
+    last: Arc<AtomicU16>,
+}
+
+impl<R: Read> Read for TrackingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.last.store(u16::from(buf[n - 1]), Ordering::SeqCst);
+        }
+        Ok(n)
+    }
+}
+
+impl<R: BufRead> BufRead for TrackingReader<R> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.inner.fill_buf()
+    }
+    fn consume(&mut self, amt: usize) {
+        if amt > 0 {
+            if let Ok(buf) = self.inner.fill_buf() {
+                if amt <= buf.len() {
+                    self.last.store(u16::from(buf[amt - 1]), Ordering::SeqCst);
+                }
+            }
+        }
+        self.inner.consume(amt);
     }
 }
 
@@ -83,20 +366,47 @@ async fn ingest_one(store: &Store, path: &str, sample_override: Option<&str>) ->
 /// erased to `Box<dyn BufRead + Send>` so both paths share the same
 /// downstream ingest code.
 ///
+/// BGZF inputs must end with the BGZF EOF marker block; a file without it
+/// was cut at a block boundary and is rejected. The returned [`TailCheck`]
+/// reports, once parsing is done, whether the decompressed stream ended on
+/// a newline.
+///
 /// As of noodles-bgzf 0.48, `MultithreadedReader` decompresses on rayon's
 /// global thread pool rather than a caller-specified worker count; configure
 /// pool size via `rayon::ThreadPoolBuilder` at the process level if needed.
-fn open_vcf_reader(path: &str) -> Result<vcf::io::Reader<Box<dyn BufRead + Send>>> {
+fn open_vcf_reader(path: &str) -> Result<(vcf::io::Reader<Box<dyn BufRead + Send>>, TailCheck)> {
     let is_bgzf = path.ends_with(".gz") || path.ends_with(".bgz") || path.ends_with(".bcf");
-    let file = File::open(path).with_context(|| format!("open {path}"))?;
-    if is_bgzf {
-        let mt = bgzf::io::MultithreadedReader::new(file);
-        Ok(vcf::io::Reader::new(Box::new(mt) as Box<dyn BufRead + Send>))
+    let mut file = File::open(path).with_context(|| format!("open {path}"))?;
+    let last = Arc::new(AtomicU16::new(NO_BYTE));
+    let inner: Box<dyn BufRead + Send> = if is_bgzf {
+        let len = file.metadata()?.len();
+        let mut tail = [0u8; 28];
+        let has_eof = len >= 28 && {
+            file.seek(SeekFrom::End(-28))?;
+            file.read_exact(&mut tail)?;
+            file.seek(SeekFrom::Start(0))?;
+            tail == BGZF_EOF
+        };
+        if !has_eof {
+            return Err(Error::Truncated {
+                path: path.to_string(),
+                detail: "the BGZF end-of-file marker block is missing (the writer did not finish)"
+                    .into(),
+            }
+            .into());
+        }
+        Box::new(bgzf::io::MultithreadedReader::new(file))
     } else {
-        Ok(vcf::io::Reader::new(
-            Box::new(BufReader::new(file)) as Box<dyn BufRead + Send>
-        ))
-    }
+        Box::new(BufReader::new(file))
+    };
+    let tracked = TrackingReader {
+        inner,
+        last: Arc::clone(&last),
+    };
+    Ok((
+        vcf::io::Reader::new(Box::new(tracked) as Box<dyn BufRead + Send>),
+        TailCheck(last),
+    ))
 }
 
 /// Open the named table or create an empty one with the given schema.
@@ -135,6 +445,9 @@ fn extract_reference(header: &vcf::Header) -> Option<String> {
     }
 }
 
+/// Record the sample in the registry. Called only after its variants were
+/// written and the file was checked complete, so a registry row means a
+/// finished ingest.
 async fn register_sample(
     conn: &Connection,
     sample_name: &str,
@@ -226,16 +539,46 @@ impl VariantBuffer {
     }
 }
 
+/// Records the ingester could not turn into rows, counted by reason and
+/// printed in the summary.
+#[derive(Default)]
+struct SkipCounts {
+    /// POS 0 (no position; e.g. telomere markers).
+    no_position: u64,
+    /// ALT is `.`: reference-only sites such as hom-ref blocks.
+    no_alt: u64,
+}
+
+impl SkipCounts {
+    fn report(&self) {
+        if self.no_position > 0 {
+            eprintln!(
+                "skipped {} record(s) with POS 0 (no position)",
+                self.no_position
+            );
+        }
+        if self.no_alt > 0 {
+            eprintln!(
+                "skipped {} record(s) with ALT '.' (reference-only sites are not stored)",
+                self.no_alt
+            );
+        }
+    }
+}
+
 async fn ingest_variants<R: std::io::BufRead>(
-    conn: &Connection,
+    table: &Table,
     reader: &mut vcf::io::Reader<R>,
     header: &vcf::Header,
     sample_name: &str,
-) -> Result<()> {
-    let table = open_or_create(conn, VARIANTS_TABLE, variant_schema()).await?;
+    sample_col: usize,
+    path: &str,
+) -> Result<IngestReport> {
     let progress = make_progress();
     let mut buffer = VariantBuffer::default();
     let mut total: u64 = 0;
+    let mut skipped = SkipCounts::default();
+    let expected_samples = header.sample_names().len();
 
     // Pipeline: parsing/encoding happens on this task while another task
     // awaits `table.add`. A small bounded channel keeps memory bounded
@@ -249,38 +592,69 @@ async fn ingest_variants<R: std::io::BufRead>(
         Ok::<_, anyhow::Error>(())
     });
 
-    for result in reader.records() {
-        let record = result?;
-        append_variant_rows(&record, header, sample_name, &mut buffer)?;
+    let mut parse_err: Option<anyhow::Error> = None;
+    for (n, result) in reader.records().enumerate() {
+        let step = result
+            .with_context(|| format!("{path}: reading record {}", n + 1))
+            .and_then(|record| {
+                append_variant_rows(
+                    &record,
+                    header,
+                    sample_name,
+                    sample_col,
+                    expected_samples,
+                    &mut buffer,
+                    &mut skipped,
+                )
+                .with_context(|| format!("{path}: record {}", n + 1))
+            });
+        if let Err(e) = step {
+            parse_err = Some(e);
+            break;
+        }
 
         if buffer.len() >= BATCH_SIZE {
-            let n = buffer.len() as u64;
+            let rows = buffer.len() as u64;
             let batch = std::mem::take(&mut buffer).into_batch()?;
             if tx.send(batch).await.is_err() {
                 break;
             }
-            total += n;
+            total += rows;
             progress.set_position(total);
         }
     }
 
-    if buffer.len() > 0 {
-        let n = buffer.len() as u64;
+    if parse_err.is_none() && buffer.len() > 0 {
+        let rows = buffer.len() as u64;
         let batch = buffer.into_batch()?;
-        tx.send(batch).await.ok();
-        total += n;
+        if tx.send(batch).await.is_ok() {
+            total += rows;
+        }
     }
     drop(tx);
-    writer
+    let written = writer
         .await
-        .map_err(|e| anyhow!("writer task panicked: {e}"))??;
+        .map_err(|e| anyhow!("writer task panicked: {e}"))?;
+    if let Some(e) = parse_err {
+        // Report the parse error; a concurrent writer error would only be a
+        // secondary symptom, but do not drop it.
+        return Err(match written {
+            Ok(()) => e,
+            Err(w) => e.context(format!("(the table writer also failed: {w:#})")),
+        });
+    }
+    written?;
 
     let done_msg = format!("ingested {total} rows for sample {sample_name}");
     progress.finish_with_message(done_msg.clone());
     eprintln!("{done_msg}");
-
-    ensure_variant_indices(&table).await?;
-    Ok(())
+    skipped.report();
+    Ok(IngestReport {
+        files: 1,
+        rows: total,
+        skipped_no_position: skipped.no_position,
+        skipped_no_alt: skipped.no_alt,
+    })
 }
 
 /// Create `(chrom, pos, sample_name)` scalar indices on the variants table
@@ -325,25 +699,62 @@ struct SampleFormatFields {
     key_order: Option<String>,
 }
 
+fn invalid_format(chrom: &str, pos: u64, key: &str, reason: impl ToString) -> anyhow::Error {
+    Error::MalformedRecord {
+        chrom: chrom.to_string(),
+        pos,
+        field: format!("FORMAT/{key}"),
+        reason: reason.to_string(),
+    }
+    .into()
+}
+
 fn append_variant_rows(
     record: &vcf::Record,
     header: &vcf::Header,
     sample_name: &str,
+    sample_col: usize,
+    expected_samples: usize,
     buf: &mut VariantBuffer,
+    skipped: &mut SkipCounts,
 ) -> Result<()> {
     let chrom = record.reference_sequence_name().to_string();
     let pos = match record.variant_start() {
-        Some(p) => usize::from(p?) as u64,
-        None => return Ok(()), // skip records without a position (symbolic etc.)
+        Some(p) => usize::from(p.context("invalid POS")?) as u64,
+        None => {
+            skipped.no_position += 1;
+            return Ok(());
+        }
     };
+
+    let found_samples = record.samples().iter().count();
+    if found_samples != expected_samples {
+        return Err(Error::MalformedRecord {
+            chrom,
+            pos,
+            field: "sample columns".into(),
+            reason: format!(
+                "record has {found_samples} sample column(s) but the header declares {expected_samples}"
+            ),
+        }
+        .into());
+    }
+
     let ref_allele = record.reference_bases().to_string();
-    let quality = record.quality_score().transpose().ok().flatten();
+    let quality = record
+        .quality_score()
+        .transpose()
+        .with_context(|| format!("{chrom}:{pos}: invalid QUAL"))?;
 
     let filter = {
         let filters = record.filters();
         let mut parts = Vec::new();
         for result in filters.iter(header) {
-            parts.push(result?.to_string());
+            parts.push(
+                result
+                    .with_context(|| format!("{chrom}:{pos}: invalid FILTER"))?
+                    .to_string(),
+            );
         }
         if parts.is_empty() {
             None
@@ -365,23 +776,47 @@ fn append_variant_rows(
         }
     };
 
-    let fmt = extract_sample_format_fields(record, header)?;
-    let info_af_per_alt = parse_info_af(record, header)?;
-    let info_raw = serialize_info(record, header)?;
+    // ALT list. A lone "." means a reference-only site. Missing or empty
+    // elements next to real alleles would shift the allele numbering, so
+    // they are an error.
+    let mut alt_list: Vec<String> = Vec::new();
+    let mut missing_alts = 0usize;
+    for r in record.alternate_bases().iter() {
+        let s = r
+            .with_context(|| format!("{chrom}:{pos}: invalid ALT"))?
+            .to_string();
+        if s == "." || s.is_empty() {
+            missing_alts += 1;
+        } else {
+            alt_list.push(s);
+        }
+    }
+    if missing_alts > 0 && !alt_list.is_empty() {
+        return Err(Error::MalformedRecord {
+            chrom,
+            pos,
+            field: "ALT".into(),
+            reason: format!(
+                "'{}' mixes missing or empty alleles with real alleles",
+                record.alternate_bases().as_ref()
+            ),
+        }
+        .into());
+    }
 
-    let gt_indices: Option<Vec<Option<usize>>> = parse_gt_indices(fmt.gt_raw.as_deref());
-
-    // Count real ALTs (skip "." / empty).
-    let alt_list: Vec<String> = record
-        .alternate_bases()
-        .iter()
-        .filter_map(|r| r.ok().map(|s| s.to_string()))
-        .filter(|s| s != "." && !s.is_empty())
-        .collect();
-    let alt_count = alt_list.len() as u32;
+    let fmt = extract_sample_format_fields(record, header, sample_col, &chrom, pos)?;
+    let alt_count = alt_list.len();
+    let info_raw = validate_and_raw_info(record, header, &chrom, pos)?;
     if alt_count == 0 {
+        skipped.no_alt += 1;
         return Ok(());
     }
+    let info_af_per_alt = parse_info_af(record, header, alt_count, &chrom, pos)?;
+    let gt_indices = match fmt.gt_raw.as_deref() {
+        Some(gt) => Some(parse_gt_indices(gt, alt_count, &chrom, pos)?),
+        None => None,
+    };
+    let alt_count = alt_count as u32;
 
     for (alt_index, alt) in alt_list.into_iter().enumerate() {
         // Per-allele genotype: report whether the reference sample carries this alt.
@@ -418,164 +853,175 @@ fn append_variant_rows(
     Ok(())
 }
 
-/// Extract GT (as a raw display string), DP, AD, GQ, PL from the first
-/// sample column. Values are returned as owned strings/u32 so nothing
-/// borrows from the transient `samples()` view.
+/// Escape a raw FORMAT value for storage in the `KEY=VAL;KEY=VAL`
+/// `format_extra` column: `%`, `;` and `=` become `%25`, `%3B`, `%3D`.
+pub(crate) fn encode_extra_value(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            ';' => out.push_str("%3B"),
+            '=' => out.push_str("%3D"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Inverse of [`encode_extra_value`].
+pub(crate) fn decode_extra_value(stored: &str) -> String {
+    stored
+        .replace("%3B", ";")
+        .replace("%3D", "=")
+        .replace("%25", "%")
+}
+
+/// Extract GT, DP, AD, GQ, PL and the remaining FORMAT fields from the
+/// chosen sample column. Values are kept as the raw text of the file so
+/// that export writes back exactly what was read; the typed parse is only
+/// used to reject malformed values.
 fn extract_sample_format_fields(
     record: &vcf::Record,
     header: &vcf::Header,
+    sample_col: usize,
+    chrom: &str,
+    pos: u64,
 ) -> Result<SampleFormatFields> {
     let samples = record.samples();
-    let Some(sample) = samples.get_index(0) else {
+    let Some(sample) = samples.get_index(sample_col) else {
         return Ok(SampleFormatFields::default());
     };
+    let raw_sample: &str = sample.as_ref();
 
-    let gt_raw = match sample.get(header, "GT") {
-        Some(res) => res?.as_ref().map(value_to_string),
-        None => None,
-    };
-    let dp = match sample.get(header, "DP") {
-        Some(res) => match res? {
-            Some(SampleValue::Integer(n)) if n >= 0 => Some(n as u32),
-            _ => None,
-        },
-        None => None,
-    };
-    let ad = match sample.get(header, "AD") {
-        Some(res) => res?.as_ref().map(value_to_string),
-        None => None,
-    };
-    let gq = match sample.get(header, "GQ") {
-        Some(res) => match res? {
-            Some(SampleValue::Integer(n)) if n >= 0 => Some(n as u32),
-            _ => None,
-        },
-        None => None,
-    };
-    let pl = match sample.get(header, "PL") {
-        Some(res) => res?.as_ref().map(value_to_string),
-        None => None,
-    };
-
-    // Collect everything else into a compact "KEY=VAL;KEY=VAL" blob so
-    // `genolance export` can re-emit FORMAT fields we don't model directly
-    // (VAF, MIN_DP, MED_DP, ...). Known keys are skipped to avoid duplication.
-    // Also capture the full key order (all keys, in record order) for faithful
-    // FORMAT column reconstruction on export.
-    const KNOWN: &[&str] = &["GT", "AD", "DP", "GQ", "PL"];
+    let mut out = SampleFormatFields::default();
     let mut extra_parts: Vec<String> = Vec::new();
     let mut all_keys: Vec<String> = Vec::new();
+    let mut raw_values = raw_sample.split(':');
     for result in sample.iter(header) {
-        let (key, value) = result?;
+        let (key, value) = result.map_err(|e| invalid_format(chrom, pos, "*", e))?;
+        let raw = raw_values.next().unwrap_or(".");
         all_keys.push(key.to_string());
-        if KNOWN.contains(&key) {
-            continue;
+        if let Some(v) = &value {
+            check_sample_value(v).map_err(|e| invalid_format(chrom, pos, key, e))?;
         }
-        match value {
-            None => extra_parts.push(key.to_string()),
-            Some(v) => extra_parts.push(format!("{key}={}", value_to_string(&v))),
+        let missing = raw == ".";
+        match key {
+            "GT" => {
+                if !missing {
+                    out.gt_raw = Some(raw.to_string());
+                }
+            }
+            "AD" => {
+                if !missing {
+                    out.ad = Some(raw.to_string());
+                }
+            }
+            "PL" => {
+                if !missing {
+                    out.pl = Some(raw.to_string());
+                }
+            }
+            "DP" | "GQ" => {
+                let slot = if key == "DP" {
+                    &mut out.dp
+                } else {
+                    &mut out.gq
+                };
+                match &value {
+                    None => {}
+                    Some(SampleValue::Integer(n)) if *n >= 0 => *slot = Some(*n as u32),
+                    // Not a non-negative integer (a Float-typed GQ, a
+                    // negative sentinel): keep the text as written.
+                    Some(_) => extra_parts.push(format!("{key}={}", encode_extra_value(raw))),
+                }
+            }
+            _ => extra_parts.push(format!("{key}={}", encode_extra_value(raw))),
         }
     }
-    let extra = if extra_parts.is_empty() {
+    out.extra = if extra_parts.is_empty() {
         None
     } else {
         Some(extra_parts.join(";"))
     };
-    let key_order = if all_keys.is_empty() {
+    out.key_order = if all_keys.is_empty() {
         None
     } else {
         Some(all_keys.join(":"))
     };
-
-    Ok(SampleFormatFields {
-        gt_raw,
-        dp,
-        ad,
-        gq,
-        pl,
-        extra,
-        key_order,
-    })
+    Ok(out)
 }
 
-fn value_to_string(v: &SampleValue<'_>) -> String {
-    use noodles::vcf::variant::record::samples::series::value::{
-        genotype::Phasing, Array as SampleArray,
-    };
+/// Walk every element of an array or genotype so lazily-parsed errors
+/// surface here instead of being turned into missing values.
+fn check_sample_value(v: &SampleValue<'_>) -> std::io::Result<()> {
+    use noodles::vcf::variant::record::samples::series::value::Array as SampleArray;
     match v {
-        SampleValue::Integer(n) => n.to_string(),
-        SampleValue::Float(n) => n.to_string(),
-        SampleValue::Character(c) => c.to_string(),
-        SampleValue::String(s) => s.to_string(),
         SampleValue::Genotype(g) => {
-            let mut out = String::new();
-            let mut first = true;
             for call in g.iter() {
-                match call {
-                    Ok((allele, phasing)) => {
-                        if !first {
-                            out.push(match phasing {
-                                Phasing::Phased => '|',
-                                Phasing::Unphased => '/',
-                            });
-                        }
-                        first = false;
-                        match allele {
-                            Some(i) => out.push_str(&i.to_string()),
-                            None => out.push('.'),
-                        }
-                    }
-                    Err(_) => return String::from("."),
+                call?;
+            }
+        }
+        SampleValue::Array(arr) => match arr {
+            SampleArray::Integer(a) => {
+                for r in a.iter() {
+                    r?;
                 }
             }
-            out
-        }
-        SampleValue::Array(arr) => {
-            // Flatten array-valued FORMAT fields (AD, PL, ...) into "a,b,c".
-            let parts: Vec<String> = match arr {
-                SampleArray::Integer(a) => a
-                    .iter()
-                    .map(|r| match r {
-                        Ok(Some(n)) => n.to_string(),
-                        _ => ".".to_string(),
-                    })
-                    .collect(),
-                SampleArray::Float(a) => a
-                    .iter()
-                    .map(|r| match r {
-                        Ok(Some(n)) => n.to_string(),
-                        _ => ".".to_string(),
-                    })
-                    .collect(),
-                SampleArray::Character(a) => a
-                    .iter()
-                    .map(|r| match r {
-                        Ok(Some(c)) => c.to_string(),
-                        _ => ".".to_string(),
-                    })
-                    .collect(),
-                SampleArray::String(a) => a
-                    .iter()
-                    .map(|r| match r {
-                        Ok(Some(s)) => s.into_owned(),
-                        _ => ".".to_string(),
-                    })
-                    .collect(),
-            };
-            parts.join(",")
-        }
+            SampleArray::Float(a) => {
+                for r in a.iter() {
+                    r?;
+                }
+            }
+            SampleArray::Character(a) => {
+                for r in a.iter() {
+                    r?;
+                }
+            }
+            SampleArray::String(a) => {
+                for r in a.iter() {
+                    r?;
+                }
+            }
+        },
+        _ => {}
     }
+    Ok(())
 }
 
 /// Parse a genotype string like "0/1", "1|1", "./." into per-position allele
-/// indices. Returns None if parsing fails or the input is None.
-fn parse_gt_indices(gt: Option<&str>) -> Option<Vec<Option<usize>>> {
-    let gt = gt?;
-    let parts: Vec<Option<usize>> = gt
-        .split(['/', '|'])
-        .map(|s| s.parse::<usize>().ok())
-        .collect();
-    Some(parts)
+/// indices. Every allele must be `.` or an index within the ALT list.
+fn parse_gt_indices(
+    gt: &str,
+    alt_count: usize,
+    chrom: &str,
+    pos: u64,
+) -> Result<Vec<Option<usize>>> {
+    let mut parts = Vec::new();
+    for tok in gt.split(['/', '|']) {
+        if tok == "." {
+            parts.push(None);
+            continue;
+        }
+        let n: usize = tok.parse().map_err(|_| Error::MalformedRecord {
+            chrom: chrom.to_string(),
+            pos,
+            field: "FORMAT/GT".into(),
+            reason: format!("malformed genotype '{gt}'"),
+        })?;
+        if n > alt_count {
+            return Err(Error::MalformedRecord {
+                chrom: chrom.to_string(),
+                pos,
+                field: "FORMAT/GT".into(),
+                reason: format!(
+                    "genotype '{gt}' refers to allele {n} but the record has {alt_count} ALT allele(s)"
+                ),
+            }
+            .into());
+        }
+        parts.push(Some(n));
+    }
+    Ok(parts)
 }
 
 /// For a given ALT index (0-based into the ALT list), encode the genotype
@@ -594,100 +1040,134 @@ fn format_gt_for_alt(calls: &[Option<usize>], alt_index: usize) -> String {
     encoded.join("/")
 }
 
-/// Try to read INFO/AF (one value per ALT). Returns Some(...) if present.
-fn parse_info_af(record: &vcf::Record, header: &vcf::Header) -> Result<Option<Vec<Option<f32>>>> {
+/// Read INFO/AF as one value per ALT allele, using the Number declared in
+/// the header: `A` gives one value per ALT, `R` gives REF then one per ALT.
+/// Any other layout, a non-Float type, or a wrong value count is an error.
+fn parse_info_af(
+    record: &vcf::Record,
+    header: &vcf::Header,
+    alt_count: usize,
+    chrom: &str,
+    pos: u64,
+) -> Result<Option<Vec<Option<f32>>>> {
+    use noodles::vcf::header::record::value::map::info::Type as InfoType;
     use noodles::vcf::variant::record::info::field::{
         value::Array as InfoArray, Value as InfoValue,
+    };
+    let af_err = |reason: String| -> anyhow::Error {
+        Error::MalformedRecord {
+            chrom: chrom.to_string(),
+            pos,
+            field: "INFO/AF".into(),
+            reason,
+        }
+        .into()
     };
 
     let info = record.info();
     let Some(result) = info.get(header, "AF") else {
         return Ok(None);
     };
-    let Some(value) = result? else {
+    let Some(value) = result.map_err(|e| af_err(e.to_string()))? else {
         return Ok(None);
     };
-    match value {
-        InfoValue::Float(f) => Ok(Some(vec![Some(f)])),
+    let (number, ty) = match header.infos().get("AF") {
+        Some(def) => (def.number(), def.ty()),
+        None => (InfoNumber::A, InfoType::Float),
+    };
+    if ty != InfoType::Float {
+        return Err(af_err(format!(
+            "header declares AF as Type={ty:?}, not Float"
+        )));
+    }
+    let values: Vec<Option<f32>> = match value {
+        InfoValue::Float(f) => vec![Some(f)],
         InfoValue::Array(InfoArray::Float(arr)) => {
             let mut out = Vec::new();
             for r in arr.iter() {
-                out.push(r?);
+                out.push(r.map_err(|e| af_err(e.to_string()))?);
             }
-            Ok(Some(out))
+            out
         }
-        _ => Ok(None),
+        other => return Err(af_err(format!("expected Float values, found {other:?}"))),
+    };
+    let per_alt = match number {
+        InfoNumber::A => values,
+        InfoNumber::Count(1) if alt_count == 1 => values,
+        InfoNumber::R => values.get(1..).map(<[_]>::to_vec).unwrap_or_default(),
+        other => {
+            return Err(af_err(format!(
+                "header declares AF with Number={other:?}; only A and R are understood"
+            )))
+        }
+    };
+    if per_alt.len() != alt_count {
+        return Err(af_err(format!(
+            "{} value(s) for {alt_count} ALT allele(s)",
+            per_alt.len()
+        )));
     }
+    Ok(Some(per_alt))
 }
 
-/// Serialize the full INFO column back to VCF text ("K=V;K=V" or just "K"
-/// for flag fields). Stored once per site but duplicated across split
-/// per-alt rows so export only has to read one.
-fn serialize_info(record: &vcf::Record, header: &vcf::Header) -> Result<Option<String>> {
+/// Check that every INFO value parses (including each array element), and
+/// return the INFO column exactly as written. `.` (no INFO) becomes None.
+fn validate_and_raw_info(
+    record: &vcf::Record,
+    header: &vcf::Header,
+    chrom: &str,
+    pos: u64,
+) -> Result<Option<String>> {
     use noodles::vcf::variant::record::info::field::{
         value::Array as InfoArray, Value as InfoValue,
     };
-
     let info = record.info();
-    if info.is_empty() {
-        return Ok(None);
-    }
-
-    let mut parts: Vec<String> = Vec::new();
     for result in info.iter(header) {
-        let (key, value) = result?;
-        match value {
-            None => parts.push(key.to_string()),
-            Some(v) => {
-                let rendered = match v {
-                    InfoValue::Flag => {
-                        parts.push(key.to_string());
-                        continue;
-                    }
-                    InfoValue::Integer(n) => n.to_string(),
-                    InfoValue::Float(n) => n.to_string(),
-                    InfoValue::Character(c) => c.to_string(),
-                    InfoValue::String(s) => s.into_owned(),
-                    InfoValue::Array(arr) => match arr {
-                        InfoArray::Integer(a) => join_opt_iter(
-                            a.iter()
-                                .map(|r| r.map(|o: Option<i32>| o.map(|n| n.to_string()))),
-                        ),
-                        InfoArray::Float(a) => join_opt_iter(
-                            a.iter()
-                                .map(|r| r.map(|o: Option<f32>| o.map(|n| n.to_string()))),
-                        ),
-                        InfoArray::Character(a) => join_opt_iter(
-                            a.iter()
-                                .map(|r| r.map(|o: Option<char>| o.map(|c| c.to_string()))),
-                        ),
-                        InfoArray::String(a) => join_opt_iter(a.iter().map(|r| {
-                            r.map(|o| o.map(|s: std::borrow::Cow<'_, str>| s.into_owned()))
-                        })),
-                    },
-                };
-                parts.push(format!("{key}={rendered}"));
+        let invalid = |key: &str, reason: String| -> anyhow::Error {
+            Error::MalformedRecord {
+                chrom: chrom.to_string(),
+                pos,
+                field: format!("INFO/{key}"),
+                reason,
             }
+            .into()
+        };
+        let (key, value) = result.map_err(|e| invalid("*", e.to_string()))?;
+        if let Some(InfoValue::Array(arr)) = value {
+            let res: std::io::Result<()> = (|| {
+                match arr {
+                    InfoArray::Integer(a) => {
+                        for r in a.iter() {
+                            r?;
+                        }
+                    }
+                    InfoArray::Float(a) => {
+                        for r in a.iter() {
+                            r?;
+                        }
+                    }
+                    InfoArray::Character(a) => {
+                        for r in a.iter() {
+                            r?;
+                        }
+                    }
+                    InfoArray::String(a) => {
+                        for r in a.iter() {
+                            r?;
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            res.map_err(|e| invalid(key, e.to_string()))?;
         }
     }
-    if parts.is_empty() {
-        Ok(None)
+    let raw: &str = info.as_ref();
+    Ok(if raw.is_empty() || raw == "." {
+        None
     } else {
-        Ok(Some(parts.join(";")))
-    }
-}
-
-fn join_opt_iter<I>(it: I) -> String
-where
-    I: Iterator<Item = std::io::Result<Option<String>>>,
-{
-    let parts: Vec<String> = it
-        .map(|r| match r {
-            Ok(Some(s)) => s,
-            _ => ".".to_string(),
-        })
-        .collect();
-    parts.join(",")
+        Some(raw.to_string())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -733,14 +1213,15 @@ impl ClinVarBuffer {
 }
 
 async fn ingest_clinvar<R: std::io::BufRead>(
-    conn: &Connection,
+    table: &Table,
     reader: &mut vcf::io::Reader<R>,
     header: &vcf::Header,
-) -> Result<()> {
-    let table = open_or_create(conn, CLINVAR_TABLE, clinvar_schema()).await?;
+    path: &str,
+) -> Result<IngestReport> {
     let progress = make_progress();
     let mut buffer = ClinVarBuffer::default();
     let mut total: u64 = 0;
+    let mut skipped = SkipCounts::default();
 
     let (tx, mut rx) = mpsc::channel::<RecordBatch>(2);
     let writer_table = table.clone();
@@ -751,45 +1232,70 @@ async fn ingest_clinvar<R: std::io::BufRead>(
         Ok::<_, anyhow::Error>(())
     });
 
-    for result in reader.records() {
-        let record = result?;
-        append_clinvar_rows(&record, header, &mut buffer)?;
+    let mut parse_err: Option<anyhow::Error> = None;
+    for (n, result) in reader.records().enumerate() {
+        let step = result
+            .with_context(|| format!("{path}: reading record {}", n + 1))
+            .and_then(|record| {
+                append_clinvar_rows(&record, header, &mut buffer, &mut skipped)
+                    .with_context(|| format!("{path}: record {}", n + 1))
+            });
+        if let Err(e) = step {
+            parse_err = Some(e);
+            break;
+        }
 
         if buffer.len() >= BATCH_SIZE {
-            let n = buffer.len() as u64;
+            let rows = buffer.len() as u64;
             let batch = std::mem::take(&mut buffer).into_batch()?;
             if tx.send(batch).await.is_err() {
                 break;
             }
-            total += n;
+            total += rows;
             progress.set_position(total);
         }
     }
 
-    if buffer.len() > 0 {
-        let n = buffer.len() as u64;
+    if parse_err.is_none() && buffer.len() > 0 {
+        let rows = buffer.len() as u64;
         let batch = buffer.into_batch()?;
-        tx.send(batch).await.ok();
-        total += n;
+        if tx.send(batch).await.is_ok() {
+            total += rows;
+        }
     }
     drop(tx);
-    writer
+    let written = writer
         .await
-        .map_err(|e| anyhow!("writer task panicked: {e}"))??;
+        .map_err(|e| anyhow!("writer task panicked: {e}"))?;
+    if let Some(e) = parse_err {
+        return Err(match written {
+            Ok(()) => e,
+            Err(w) => e.context(format!("(the table writer also failed: {w:#})")),
+        });
+    }
+    written?;
 
     let done_msg = format!("ingested {total} ClinVar rows");
     progress.finish_with_message(done_msg.clone());
     eprintln!("{done_msg}");
-    Ok(())
+    skipped.report();
+    Ok(IngestReport {
+        files: 1,
+        rows: total,
+        skipped_no_position: skipped.no_position,
+        skipped_no_alt: skipped.no_alt,
+    })
 }
 
 fn append_clinvar_rows(
     record: &vcf::Record,
     header: &vcf::Header,
     buf: &mut ClinVarBuffer,
+    skipped: &mut SkipCounts,
 ) -> Result<()> {
     let chrom = record.reference_sequence_name().to_string();
     let Some(pos_result) = record.variant_start() else {
+        skipped.no_position += 1;
         return Ok(());
     };
     let pos = usize::from(pos_result?) as u64;
@@ -821,11 +1327,13 @@ fn append_clinvar_rows(
     let review_status = info_scalar_string(record, header, "CLNREVSTAT")?;
     let disease_name = info_scalar_string(record, header, "CLNDN")?;
 
+    let mut any_alt = false;
     for alt_result in record.alternate_bases().iter() {
         let alt = alt_result?.to_string();
         if alt == "." || alt.is_empty() {
             continue;
         }
+        any_alt = true;
         buf.chrom.push(chrom.clone());
         buf.pos.push(pos);
         buf.ref_allele.push(ref_allele.clone());
@@ -836,6 +1344,9 @@ fn append_clinvar_rows(
             .push(clinical_significance.clone());
         buf.review_status.push(review_status.clone());
         buf.disease_name.push(disease_name.clone());
+    }
+    if !any_alt {
+        skipped.no_alt += 1;
     }
 
     Ok(())

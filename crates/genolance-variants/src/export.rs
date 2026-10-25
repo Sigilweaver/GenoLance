@@ -271,7 +271,7 @@ fn write_site<W: Write>(w: &mut W, site: &[Row], _sample_name: &str) -> Result<(
             }
             match part.split_once('=') {
                 Some((k, v)) => {
-                    kv.insert(k.to_string(), v.to_string());
+                    kv.insert(k.to_string(), crate::ingest::decode_extra_value(v));
                 }
                 None => {
                     kv.insert(part.to_string(), ".".to_string());
