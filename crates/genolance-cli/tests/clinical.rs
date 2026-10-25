@@ -693,21 +693,25 @@ fn repeated_sample_merges_and_merge_flag_is_gone() {
     assert_eq!(o.status.code(), Some(2));
 }
 
-// Exit codes: 2 for a request that cannot be honoured, 3 for rejected input.
+// Exit codes: 2 for a request that cannot be honoured, 3 for rejected data.
 #[test]
 fn exit_codes_follow_the_error_kind() {
     let t = Tmp::new();
     setup(&t, &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"], &[CV_1]);
-    let o = gl(&[
-        "join",
-        "-s",
-        &t.store(),
-        "--against",
-        &t.path("cv.vcf"),
-        "--significance-exact",
-        "",
-    ]);
-    assert_eq!(o.status.code(), Some(2));
+    let o = gl(&["join", "-s", &t.store(), "--significance-exact", ""]);
+    assert_eq!(o.status.code(), Some(2), "empty filter list");
     let o = gl(&["ingest", "-s", &t.store(), &t.path("s.vcf")]);
-    assert_eq!(o.status.code(), Some(3), "duplicate sample");
+    assert_eq!(o.status.code(), Some(2), "duplicate sample");
+    let o = gl(&["compare", "-s", &t.store(), "S1", "Typo"]);
+    assert_eq!(o.status.code(), Some(2), "unknown sample");
+    let o = gl(&["query", "-s", &t.store(), "--gene", "NOPE1"]);
+    assert_eq!(o.status.code(), Some(2), "unknown gene");
+    let o = gl(&["export", "-s", &t.store(), "--sample", "S1", "--chrom", "9"]);
+    assert_eq!(o.status.code(), Some(2), "empty region");
+    // Rejected data: a VCF cut mid-line.
+    let mut cut = sample_vcf("S2", &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"]);
+    cut.pop();
+    std::fs::write(t.path("cut.vcf"), cut).unwrap();
+    let o = gl(&["ingest", "-s", &t.store(), &t.path("cut.vcf")]);
+    assert_eq!(o.status.code(), Some(3), "truncated input");
 }
