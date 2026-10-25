@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
+use arrow_array::builder::{ListBuilder, StringBuilder};
 use arrow_array::{BooleanArray, Float32Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
 use arrow_schema::SchemaRef;
 use genolance_core::{Error, Result, ResultExt};
@@ -24,13 +25,14 @@ use noodles::vcf::{
 use tokio::sync::mpsc;
 
 use genolance_core::schema::{
-    clinvar_schema, samples_schema, variant_schema, CLINVAR_TABLE, META_CLINVAR_CONTIGS,
-    META_CLINVAR_REFERENCE, META_CLINVAR_RELEASE, META_CLINVAR_SOURCE, META_CLINVAR_STATE,
-    SAMPLES_TABLE, VARIANTS_TABLE,
+    clinvar_schema, samples_schema, variant_schema, CLINVAR_TABLE, META_CLINVAR_ASSEMBLY,
+    META_CLINVAR_CONTIGS, META_CLINVAR_REFERENCE, META_CLINVAR_RELEASE, META_CLINVAR_SOURCE,
+    META_CLINVAR_STATE, SAMPLES_TABLE, VARIANTS_TABLE,
 };
 use genolance_core::store::Store;
 
-use crate::common::normalize_alleles;
+use crate::assembly::{self, Assembly, Inferred};
+use crate::common::{is_unnormalizable, normalize_alleles, normalize_chrom};
 
 /// Number of rows to buffer before flushing a batch to the Lance table.
 const BATCH_SIZE: usize = 10_000;
@@ -57,6 +59,9 @@ pub struct IngestOptions {
     pub replace: bool,
     /// Ingest as a ClinVar release even if the header has no INFO/CLNSIG.
     pub clinvar: bool,
+    /// Declare the reference assembly (`GRCh37`, `GRCh38`, `T2T-CHM13`) when
+    /// the header does not make it recognisable. Overrides what is inferred.
+    pub assembly: Option<String>,
 }
 
 impl IngestOptions {
@@ -80,6 +85,10 @@ impl IngestOptions {
         self.clinvar = clinvar;
         self
     }
+    pub fn with_assembly(mut self, assembly: impl Into<String>) -> Self {
+        self.assembly = Some(assembly.into());
+        self
+    }
 }
 
 /// What an ingest run did. Counts of everything it did not store are here,
@@ -98,6 +107,9 @@ pub struct IngestReport {
     /// Alleles stored with a trimmed join key different from the raw
     /// REF/ALT (multi-allelic splits, padded indels).
     pub normalized_alleles: u64,
+    /// Symbolic (`<DEL>`), breakend and `*` alleles: stored, but they cannot be
+    /// trimmed, so they only join annotation records that write them identically.
+    pub unnormalizable_alleles: u64,
     /// DP or GQ values that are not non-negative integers; they are kept
     /// as written in the sample column but not in the typed column.
     pub unparsed_dp_gq: u64,
@@ -110,6 +122,7 @@ impl IngestReport {
         self.skipped_no_position += other.skipped_no_position;
         self.skipped_no_alt += other.skipped_no_alt;
         self.normalized_alleles += other.normalized_alleles;
+        self.unnormalizable_alleles += other.unnormalizable_alleles;
         self.unparsed_dp_gq += other.unparsed_dp_gq;
     }
 }
@@ -129,6 +142,13 @@ pub async fn run(store_path: &str, files: &[String], opts: &IngestOptions) -> Re
             "--sample renames one sample, but {} files were given; ingest the files one at a time",
             files.len()
         )));
+    }
+    if let Some(label) = &opts.assembly {
+        if Assembly::from_label(label).is_none() {
+            return Err(Error::InvalidArgument(format!(
+                "unknown assembly '{label}'; expected GRCh37, GRCh38 or T2T-CHM13"
+            )));
+        }
     }
     let store = Store::open_or_create(store_path).await?;
 
@@ -178,7 +198,7 @@ async fn ingest_one(store: &Store, path: &str, opts: &IngestOptions) -> Result<I
             .and_then(|r| tail.check_complete(path).map(|()| r));
         match result {
             Ok(report) => {
-                record_clinvar_release(store, &header, filename).await?;
+                record_clinvar_release(store, &header, filename, opts.assembly.as_deref()).await?;
                 store.set_meta(META_CLINVAR_STATE, "complete").await?;
                 Ok(report)
             }
@@ -204,7 +224,14 @@ async fn ingest_one(store: &Store, path: &str, opts: &IngestOptions) -> Result<I
         prepare_sample(store, &table, &sample_name, opts.replace).await?;
         // Registered as incomplete first: an interrupted ingest leaves a
         // flag that every command refuses, instead of silent partial rows.
-        register_sample(&store.conn, &sample_name, path, &header).await?;
+        register_sample(
+            &store.conn,
+            &sample_name,
+            path,
+            &header,
+            opts.assembly.as_deref(),
+        )
+        .await?;
 
         let result = ingest_variants(&table, &mut reader, &header, &sample_name, col_idx, path)
             .await
@@ -238,21 +265,36 @@ async fn remove_sample(store: &Store, calls: &Table, pred: &str) -> Result<()> {
     Ok(())
 }
 
-/// Record the ClinVar release (file date), source, reference and contig
-/// lengths so later commands can show the release and check the assembly.
-async fn record_clinvar_release(store: &Store, header: &vcf::Header, filename: &str) -> Result<()> {
+/// The `##fileDate` of a header, if it has one.
+pub(crate) fn file_date(header: &vcf::Header) -> Option<String> {
     use noodles::vcf::header::record::value::Collection;
-    let file_date = match header.other_records().get("fileDate") {
+    match header.other_records().get("fileDate") {
         Some(Collection::Unstructured(list)) => list.first().cloned(),
         _ => None,
-    };
-    store
-        .set_meta(
-            META_CLINVAR_RELEASE,
-            file_date.as_deref().unwrap_or("unknown"),
-        )
-        .await?;
+    }
+}
+
+/// Record the ClinVar release (file date), source, reference and contig
+/// lengths so later commands can show the release and check the assembly.
+async fn record_clinvar_release(
+    store: &Store,
+    header: &vcf::Header,
+    filename: &str,
+    assembly_override: Option<&str>,
+) -> Result<()> {
+    match file_date(header) {
+        Some(d) => store.set_meta(META_CLINVAR_RELEASE, &d).await?,
+        None => store.clear_meta(META_CLINVAR_RELEASE).await?,
+    }
     store.set_meta(META_CLINVAR_SOURCE, filename).await?;
+    let assembly = header_assembly(header, assembly_override)?;
+    match assembly.assembly {
+        Some(a) => store.set_meta(META_CLINVAR_ASSEMBLY, a.as_str()).await?,
+        None => {
+            store.clear_meta(META_CLINVAR_ASSEMBLY).await?;
+            eprintln!("[ingest] ClinVar assembly unknown: {}", assembly.why);
+        }
+    }
     match extract_reference(header) {
         Some(r) => store.set_meta(META_CLINVAR_REFERENCE, &r).await?,
         None => store.clear_meta(META_CLINVAR_REFERENCE).await?,
@@ -261,6 +303,30 @@ async fn record_clinvar_release(store: &Store, header: &vcf::Header, filename: &
         .set_meta(META_CLINVAR_CONTIGS, &contigs_string(header))
         .await?;
     Ok(())
+}
+
+/// The assembly a header describes, or the one declared with `--assembly`.
+pub(crate) fn header_assembly(header: &vcf::Header, declared: Option<&str>) -> Result<Inferred> {
+    if let Some(label) = declared {
+        let a = Assembly::from_label(label).ok_or_else(|| {
+            Error::InvalidArgument(format!(
+                "unknown assembly '{label}'; expected GRCh37, GRCh38 or T2T-CHM13"
+            ))
+        })?;
+        return Ok(Inferred {
+            assembly: Some(a),
+            why: "declared with --assembly".into(),
+        });
+    }
+    let contigs: Vec<(String, u64)> = header
+        .contigs()
+        .iter()
+        .filter_map(|(name, c)| c.length().map(|l| (normalize_chrom(name), l as u64)))
+        .collect();
+    Ok(assembly::infer(
+        &contigs,
+        extract_reference(header).as_deref(),
+    ))
 }
 
 /// Contigs that declare a length, as "name:length,name:length".
@@ -361,11 +427,14 @@ async fn prepare_clinvar_table(store: &Store, table: &Table, replace: bool) -> R
     if !replace && !interrupted {
         return Err(Error::clinvar_release_present(existing));
     }
+    // Mark the release incomplete BEFORE removing any row: a crash after the
+    // delete must not leave an empty table that looks like a finished ingest.
+    store.set_meta(META_CLINVAR_STATE, "incomplete").await?;
     delete_all(table).await?;
     for key in [
-        META_CLINVAR_STATE,
         META_CLINVAR_RELEASE,
         META_CLINVAR_SOURCE,
+        META_CLINVAR_ASSEMBLY,
         META_CLINVAR_REFERENCE,
         META_CLINVAR_CONTIGS,
     ] {
@@ -537,8 +606,16 @@ async fn register_sample(
     sample_name: &str,
     source_path: &str,
     header: &vcf::Header,
+    assembly_override: Option<&str>,
 ) -> Result<()> {
     let table = open_or_create(conn, SAMPLES_TABLE, samples_schema()).await?;
+    let assembly = header_assembly(header, assembly_override)?;
+    if assembly.assembly.is_none() {
+        eprintln!(
+            "[ingest] assembly of sample '{sample_name}' unknown: {}; joins against ClinVar will ask for --assembly or --skip-reference-check",
+            assembly.why
+        );
+    }
 
     let header_text = serialize_header(header)?;
     let reference = extract_reference(header);
@@ -555,6 +632,9 @@ async fn register_sample(
             Arc::new(StringArray::from(vec![reference])),
             Arc::new(BooleanArray::from(vec![false])),
             Arc::new(StringArray::from(vec![Some(contigs_string(header))])),
+            Arc::new(StringArray::from(vec![assembly
+                .assembly
+                .map(|a| a.as_str())])),
         ],
     )?;
     table.add(vec![batch]).execute().await?;
@@ -655,6 +735,8 @@ struct SkipCounts {
     no_alt: u64,
     /// Alleles whose join key differs from the raw REF/ALT.
     normalized: u64,
+    /// Symbolic, breakend and `*` alleles.
+    unnormalizable: u64,
     /// DP/GQ values kept only in the raw sample column.
     unparsed_dp_gq: u64,
 }
@@ -677,6 +759,12 @@ impl SkipCounts {
             eprintln!(
                 "{} allele(s) stored with a trimmed join key that differs from REF/ALT",
                 self.normalized
+            );
+        }
+        if self.unnormalizable > 0 {
+            eprintln!(
+                "{} symbolic, breakend or '*' allele(s) stored but not normalizable; they join only records that write them identically",
+                self.unnormalizable
             );
         }
         if self.unparsed_dp_gq > 0 {
@@ -778,6 +866,7 @@ async fn ingest_variants<R: std::io::BufRead>(
         skipped_no_position: skipped.no_position,
         skipped_no_alt: skipped.no_alt,
         normalized_alleles: skipped.normalized,
+        unnormalizable_alleles: skipped.unnormalizable,
         unparsed_dp_gq: skipped.unparsed_dp_gq,
     })
 }
@@ -982,6 +1071,9 @@ fn append_variant_rows(
             || &nalt != buf.alt_allele.last().expect("pushed above")
         {
             skipped.normalized += 1;
+        }
+        if is_unnormalizable(&buf.alt_allele[buf.alt_allele.len() - 1]) {
+            skipped.unnormalizable += 1;
         }
         buf.norm_pos.push(npos);
         buf.norm_ref.push(nref);
@@ -1286,7 +1378,7 @@ struct ClinVarBuffer {
     clinical_significance: Vec<Option<String>>,
     review_status: Vec<Option<String>>,
     disease_name: Vec<Option<String>>,
-    gene_symbols: Vec<Option<String>>,
+    gene_symbols: Vec<Option<Vec<String>>>,
     norm_pos: Vec<u64>,
     norm_ref: Vec<String>,
     norm_alt: Vec<String>,
@@ -1311,7 +1403,21 @@ impl ClinVarBuffer {
                 Arc::new(StringArray::from(self.clinical_significance)),
                 Arc::new(StringArray::from(self.review_status)),
                 Arc::new(StringArray::from(self.disease_name)),
-                Arc::new(StringArray::from(self.gene_symbols)),
+                {
+                    let mut b = ListBuilder::new(StringBuilder::new());
+                    for g in &self.gene_symbols {
+                        match g {
+                            Some(v) => {
+                                for s in v {
+                                    b.values().append_value(s);
+                                }
+                                b.append(true);
+                            }
+                            None => b.append(false),
+                        }
+                    }
+                    Arc::new(b.finish())
+                },
                 Arc::new(UInt64Array::from(self.norm_pos)),
                 Arc::new(StringArray::from(self.norm_ref)),
                 Arc::new(StringArray::from(self.norm_alt)),
@@ -1394,6 +1500,7 @@ async fn ingest_clinvar<R: std::io::BufRead>(
         skipped_no_position: skipped.no_position,
         skipped_no_alt: skipped.no_alt,
         normalized_alleles: skipped.normalized,
+        unnormalizable_alleles: skipped.unnormalizable,
         unparsed_dp_gq: skipped.unparsed_dp_gq,
     })
 }
@@ -1439,7 +1546,7 @@ fn append_clinvar_rows(
     let gene_symbols = if genes.is_empty() {
         None
     } else {
-        Some(format!("|{}|", genes.join("|")))
+        Some(genes.clone())
     };
 
     let clinical_significance = info_scalar_string(record, header, "CLNSIG")?;
@@ -1468,6 +1575,9 @@ fn append_clinvar_rows(
         let (npos, nref, nalt) = normalize_alleles(pos, &ref_allele, last);
         if npos != pos || nref != ref_allele || &nalt != last {
             skipped.normalized += 1;
+        }
+        if is_unnormalizable(&buf.alt_allele[buf.alt_allele.len() - 1]) {
+            skipped.unnormalizable += 1;
         }
         buf.norm_pos.push(npos);
         buf.norm_ref.push(nref);

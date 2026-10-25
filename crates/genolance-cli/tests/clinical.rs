@@ -464,3 +464,201 @@ fn empty_significance_substring_is_an_error() {
     let err = fails(&["join", "-s", &t.store(), "--significance", ""]);
     assert!(err.contains("--significance is empty"), "{err}");
 }
+
+// ---- reference assembly, ClinVar release, genes, alleles, store version ----
+
+/// The header of the real NCBI ClinVar GRCh38 VCF (release 2026-10-19), cut to
+/// the lines these tests need: it has `##reference=GRCh38` and NO `##contig`
+/// lines. Source: https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz
+const REAL_CLINVAR_HEADER: &str = "##fileformat=VCFv4.1\n\
+##fileDate=2026-10-19\n\
+##source=ClinVar\n\
+##reference=GRCh38\n\
+##ID=<Description=\"ClinVar Variation ID\">\n\
+##INFO=<ID=CLNDN,Number=.,Type=String,Description=\"ClinVar's preferred disease name for the concept specified by disease identifiers in CLNDISDB\">\n\
+##INFO=<ID=CLNSIG,Number=.,Type=String,Description=\"Aggregate germline classification for this single variant; multiple values are separated by a vertical bar\">\n\
+##INFO=<ID=GENEINFO,Number=1,Type=String,Description=\"Gene(s) for the variant reported as gene symbol:gene id. The gene symbol and id are delimited by a colon (:) and each pair is delimited by a vertical bar (|)\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
+
+fn real_clinvar(lines: &[&str]) -> String {
+    let mut s = REAL_CLINVAR_HEADER.to_string();
+    for l in lines {
+        s.push_str(l);
+        s.push('\n');
+    }
+    s
+}
+
+fn sample_with_contig(name: &str, contig: &str, lines: &[&str]) -> String {
+    let mut s = format!(
+        "##fileformat=VCFv4.2\n{contig}\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"gt\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{name}\n"
+    );
+    for l in lines {
+        s.push_str(l);
+        s.push('\n');
+    }
+    s
+}
+
+const S38: &str = "##contig=<ID=chr1,length=248956422>\n";
+const S37: &str = "##contig=<ID=chr1,length=249250621>\n";
+const HIT: &str = "chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1";
+const CV_HIT: &str = "1\t100\t1\tA\tG\t.\t.\tCLNSIG=Pathogenic;GENEINFO=GENE1:1;CLNDN=Disease_X";
+
+// B1: the real ClinVar header shape (no ##contig lines) works.
+#[test]
+fn real_clinvar_header_passes_for_a_grch38_sample() {
+    let t = Tmp::new();
+    std::fs::write(t.path("s.vcf"), sample_with_contig("S1", S38, &[HIT])).unwrap();
+    std::fs::write(t.path("cv.vcf"), real_clinvar(&[CV_HIT])).unwrap();
+    ok(&["ingest", "-s", &t.store(), &t.path("s.vcf")]);
+    ok(&["ingest", "-s", &t.store(), &t.path("cv.vcf")]);
+    let (out, err) = ok(&["join", "-s", &t.store()]);
+    assert!(out.contains("GENE1"), "{out}");
+    assert!(err.contains("ClinVar release: 2026-10-19"), "{err}");
+    assert!(err.contains("assembly GRCh38"), "{err}");
+}
+
+// B1 / S1-14: a GRCh37 sample against GRCh38 ClinVar is refused, and the
+// skip flag prints what the check would have said.
+#[test]
+fn grch37_sample_against_grch38_clinvar_is_refused() {
+    let t = Tmp::new();
+    std::fs::write(t.path("s.vcf"), sample_with_contig("S1", S37, &[HIT])).unwrap();
+    std::fs::write(t.path("cv.vcf"), real_clinvar(&[CV_HIT])).unwrap();
+    ok(&["ingest", "-s", &t.store(), &t.path("s.vcf")]);
+    ok(&["ingest", "-s", &t.store(), &t.path("cv.vcf")]);
+    let store = t.store();
+    for cmd in [
+        vec!["join", "-s", &store],
+        vec!["compound-het", "-s", &store, "--sample", "S1"],
+        vec!["pgx", "-s", &store, "--sample", "S1"],
+    ] {
+        let o = gl(&cmd);
+        assert_eq!(o.status.code(), Some(3), "{cmd:?}");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("GRCh37") && err.contains("GRCh38"), "{err}");
+    }
+    let (out, err) = ok(&["join", "-s", &t.store(), "--skip-reference-check"]);
+    assert!(out.contains("GENE1"), "{out}");
+    assert!(err.contains("WARNING: --skip-reference-check"), "{err}");
+    assert!(err.contains("would have failed"), "{err}");
+}
+
+// B1: when the assembly cannot be told, the error names the fix, and
+// declaring it at ingest resolves it.
+#[test]
+fn unknown_assembly_asks_for_a_declaration() {
+    let t = Tmp::new();
+    std::fs::write(t.path("s.vcf"), sample_with_contig("S1", "", &[HIT])).unwrap();
+    std::fs::write(t.path("cv.vcf"), real_clinvar(&[CV_HIT])).unwrap();
+    ok(&["ingest", "-s", &t.store(), &t.path("s.vcf")]);
+    ok(&["ingest", "-s", &t.store(), &t.path("cv.vcf")]);
+    let o = gl(&["join", "-s", &t.store()]);
+    assert_eq!(o.status.code(), Some(3));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("--assembly"), "{err}");
+    ok(&[
+        "ingest",
+        "-s",
+        &t.store(),
+        "--replace",
+        "--assembly",
+        "GRCh38",
+        &t.path("s.vcf"),
+    ]);
+    let (out, _) = ok(&["join", "-s", &t.store()]);
+    assert!(out.contains("GENE1"), "{out}");
+    let o = gl(&[
+        "ingest",
+        "-s",
+        &t.path("x"),
+        "--assembly",
+        "mm10",
+        &t.path("s.vcf"),
+    ]);
+    assert_eq!(o.status.code(), Some(2));
+}
+
+// S3-2: a ClinVar file without ##fileDate is shown as such, not as "unknown".
+#[test]
+fn release_without_a_file_date_is_stated_plainly() {
+    let t = Tmp::new();
+    std::fs::write(t.path("s.vcf"), sample_with_contig("S1", S38, &[HIT])).unwrap();
+    let cv = real_clinvar(&[CV_HIT]).replace("##fileDate=2026-10-19\n", "");
+    std::fs::write(t.path("cv.vcf"), cv).unwrap();
+    ok(&["ingest", "-s", &t.store(), &t.path("s.vcf")]);
+    ok(&["ingest", "-s", &t.store(), &t.path("cv.vcf")]);
+    let (_, err) = ok(&["join", "-s", &t.store()]);
+    assert!(err.contains("no ##fileDate"), "{err}");
+}
+
+// S1: `--against` with the file that is already loaded is fine.
+#[test]
+fn join_against_the_loaded_file_is_accepted() {
+    let t = Tmp::new();
+    std::fs::write(t.path("s.vcf"), sample_with_contig("S1", S38, &[HIT])).unwrap();
+    std::fs::write(t.path("cv.vcf"), real_clinvar(&[CV_HIT])).unwrap();
+    ok(&["ingest", "-s", &t.store(), &t.path("s.vcf")]);
+    ok(&["ingest", "-s", &t.store(), &t.path("cv.vcf")]);
+    let (out, _) = ok(&["join", "-s", &t.store(), "--against", &t.path("cv.vcf")]);
+    assert!(out.contains("GENE1"), "{out}");
+}
+
+// S2-6 / S13: every gene of a record is searchable, ignoring case.
+#[test]
+fn every_gene_of_a_clinvar_record_is_searchable() {
+    let t = Tmp::new();
+    std::fs::write(t.path("s.vcf"), sample_with_contig("S1", S38, &[HIT])).unwrap();
+    std::fs::write(
+        t.path("cv.vcf"),
+        real_clinvar(&["1\t100\t1\tA\tG\t.\t.\tCLNSIG=Pathogenic;GENEINFO=GENEX:1|C1orf112:2"]),
+    )
+    .unwrap();
+    ok(&["ingest", "-s", &t.store(), &t.path("s.vcf")]);
+    ok(&["ingest", "-s", &t.store(), &t.path("cv.vcf")]);
+    for g in ["C1orf112", "c1ORF112", "genex"] {
+        let (out, _) = ok(&["query", "-s", &t.store(), "--gene", g]);
+        assert!(out.contains("1 rows"), "{g}: {out}");
+    }
+    let err = fails(&["query", "-s", &t.store(), "--gene", "NOPE_1"]);
+    assert!(err.contains("NOPE_1"), "{err}");
+    let (out, _) = ok(&["join", "-s", &t.store(), "--genes", "c1orf112"]);
+    assert!(out.contains("1 annotated variants"), "{out}");
+    assert!(out.contains("GENEX,C1orf112"), "{out}");
+}
+
+// S2-7 / S10: a padded multi-allelic split and lower-case bases still match.
+#[test]
+fn trimmed_and_lowercase_alleles_join_clinvar() {
+    let t = Tmp::new();
+    std::fs::write(
+        t.path("s.vcf"),
+        sample_with_contig(
+            "S1",
+            S38,
+            &["chr1\t100\t.\tgca\tg,ga\t50\tPASS\t.\tGT\t0/2"],
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        t.path("cv.vcf"),
+        real_clinvar(&["1\t100\t1\tGC\tG\t.\t.\tCLNSIG=Pathogenic;GENEINFO=GENE1:1"]),
+    )
+    .unwrap();
+    ok(&["ingest", "-s", &t.store(), &t.path("s.vcf")]);
+    ok(&["ingest", "-s", &t.store(), &t.path("cv.vcf")]);
+    let (out, _) = ok(&["join", "-s", &t.store()]);
+    assert!(out.contains("1 annotated variants"), "{out}");
+}
+
+// Exit code 2 for a missing store (a wrong path is a request error).
+#[test]
+fn missing_store_exits_with_code_2_and_creates_nothing() {
+    let t = Tmp::new();
+    let o = gl(&["query", "-s", &t.path("nope")]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(!std::path::Path::new(&t.path("nope")).exists());
+}

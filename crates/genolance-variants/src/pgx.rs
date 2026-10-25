@@ -91,7 +91,7 @@ pub async fn run(
     if !requested.is_empty() {
         let found: Vec<RecordBatch> = clinvar
             .query()
-            .only_if(gene_match_predicate(&requested))
+            .only_if(gene_match_predicate(&requested)?)
             .select(Select::columns(&["gene_symbols"]))
             .execute()
             .await?
@@ -99,10 +99,10 @@ pub async fn run(
             .await?;
         let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
         for b in &found {
-            let col = req_str(b, CLINVAR_TABLE, "gene_symbols")?;
+            let col = crate::common::req_list(b, CLINVAR_TABLE, "gene_symbols")?;
             for i in 0..col.len() {
-                for g in col.value(i).split('|').filter(|g| !g.is_empty()) {
-                    present.insert(g.to_string());
+                for g in crate::common::list_strings(col, i) {
+                    present.insert(g.to_uppercase());
                 }
             }
         }
@@ -124,7 +124,7 @@ pub async fn run(
         })
         .collect::<Vec<_>>()
         .join(" OR ");
-    let pred = format!("{} AND ({needle_pred})", gene_match_predicate(&genes));
+    let pred = format!("{} AND ({needle_pred})", gene_match_predicate(&genes)?);
     let cv_batches: Vec<RecordBatch> = clinvar
         .query()
         .only_if(pred)

@@ -8,8 +8,8 @@ use lancedb::Connection;
 
 use crate::error::{Error, Result};
 use crate::schema::{
-    store_meta_schema, META_CLINVAR_STATE, META_FORMAT_VERSION, SAMPLES_TABLE,
-    STORE_FORMAT_VERSION, STORE_META_TABLE,
+    store_format_version, store_meta_schema, META_CLINVAR_STATE, META_FORMAT_VERSION,
+    SAMPLES_TABLE, STORE_FORMAT_MAJOR, STORE_FORMAT_MINOR, STORE_META_TABLE,
 };
 
 /// A handle to an open GenoLance store.
@@ -27,14 +27,18 @@ use crate::schema::{
 ///   methyl/               <- future: genolance-methyl layer
 /// ```
 ///
-/// The store records its format version in `store_meta`. A store with
-/// another version is rejected; it is not upgraded in place (see
-/// [`Error::StoreTooOld`]).
+/// The store records its format version (`MAJOR.MINOR`) in `store_meta`; see
+/// [`crate::schema::STORE_FORMAT_MAJOR`] for the compatibility rule: another
+/// major is refused (an older one cannot be upgraded in place, see
+/// [`Error::StoreTooOld`]), the same major is readable at any minor, and
+/// writing needs the build's own minor.
 pub struct Store {
     /// Root connection - holds the `samples` registry table.
     pub conn: Connection,
     /// Variants-layer connection - holds `calls` and `clinvar` tables.
     pub variants: Connection,
+    /// Minor format version recorded in the store.
+    pub format_minor: u32,
 }
 
 impl Store {
@@ -49,9 +53,9 @@ impl Store {
                 path: root.to_string(),
             });
         }
-        let store = Self::connect(root).await?;
+        let mut store = Self::connect(root).await?;
         match store.read_version(root).await? {
-            Version::Current => {}
+            Version::Current(minor) => store.format_minor = minor,
             Version::Empty => {
                 return Err(Error::StoreNotFound {
                     path: root.to_string(),
@@ -63,16 +67,27 @@ impl Store {
     }
 
     /// Open the store at `root` for ingest, creating it if it does not exist.
-    /// An existing store must have the current format version. Incomplete
-    /// samples are allowed here so `ingest --replace` can repair them.
+    /// An existing store must have this build's major version and a minor
+    /// that is not newer (a newer minor is read-only here). Incomplete samples
+    /// are allowed so `ingest --replace` can repair them.
     pub async fn open_or_create(root: &str) -> Result<Self> {
         // Ensure the subdirectory exists before LanceDB tries to connect.
         std::fs::create_dir_all(format!("{root}/variants"))?;
-        let store = Self::connect(root).await?;
-        if let Version::Empty = store.read_version(root).await? {
-            store
-                .set_meta(META_FORMAT_VERSION, &STORE_FORMAT_VERSION.to_string())
-                .await?;
+        let mut store = Self::connect(root).await?;
+        match store.read_version(root).await? {
+            Version::Empty => {
+                store
+                    .set_meta(META_FORMAT_VERSION, &store_format_version())
+                    .await?;
+                store.format_minor = STORE_FORMAT_MINOR;
+            }
+            Version::Current(minor) if minor > STORE_FORMAT_MINOR => {
+                return Err(Error::store_too_new(
+                    format!("{STORE_FORMAT_MAJOR}.{minor}"),
+                    store_format_version(),
+                ));
+            }
+            Version::Current(minor) => store.format_minor = minor,
         }
         Ok(store)
     }
@@ -86,7 +101,11 @@ impl Store {
         }
         let conn = lancedb::connect(root).execute().await?;
         let variants = lancedb::connect(&variants_path).execute().await?;
-        Ok(Self { conn, variants })
+        Ok(Self {
+            conn,
+            variants,
+            format_minor: STORE_FORMAT_MINOR,
+        })
     }
 
     async fn read_version(&self, root: &str) -> Result<Version> {
@@ -94,23 +113,21 @@ impl Store {
         if root_tables.iter().any(|n| n == STORE_META_TABLE) {
             let found = self.meta(META_FORMAT_VERSION).await?;
             let Some(found) = found else {
-                return Err(Error::StoreTooOld {
-                    path: root.to_string(),
-                    found: "missing".into(),
-                    supported: STORE_FORMAT_VERSION,
-                });
+                return Err(Error::store_too_old(
+                    root,
+                    "missing",
+                    store_format_version(),
+                ));
             };
-            return match found.parse::<u32>() {
-                Ok(v) if v == STORE_FORMAT_VERSION => Ok(Version::Current),
-                Ok(v) if v > STORE_FORMAT_VERSION => Err(Error::StoreTooNew {
-                    found,
-                    supported: STORE_FORMAT_VERSION,
-                }),
-                _ => Err(Error::StoreTooOld {
-                    path: root.to_string(),
-                    found,
-                    supported: STORE_FORMAT_VERSION,
-                }),
+            let parsed = found
+                .split_once('.')
+                .and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)));
+            return match parsed {
+                Some((major, minor)) if major == STORE_FORMAT_MAJOR => Ok(Version::Current(minor)),
+                Some((major, _)) if major > STORE_FORMAT_MAJOR => {
+                    Err(Error::store_too_new(found, store_format_version()))
+                }
+                _ => Err(Error::store_too_old(root, found, store_format_version())),
             };
         }
         let variant_tables = self.variants.table_names().execute().await?;
@@ -118,11 +135,11 @@ impl Store {
             Ok(Version::Empty)
         } else {
             // Tables but no store_meta: written before format versions.
-            Err(Error::StoreTooOld {
-                path: root.to_string(),
-                found: "unversioned".into(),
-                supported: STORE_FORMAT_VERSION,
-            })
+            Err(Error::store_too_old(
+                root,
+                "unversioned",
+                store_format_version(),
+            ))
         }
     }
 
@@ -196,7 +213,8 @@ impl Store {
         Ok(None)
     }
 
-    /// Set a metadata value, replacing any previous value for the key.
+    /// Set a metadata value, replacing any previous value for the key. The
+    /// write is an upsert, so there is no moment without the key.
     pub async fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         let root_tables = self.conn.table_names().execute().await?;
         let t = if root_tables.iter().any(|n| n == STORE_META_TABLE) {
@@ -207,8 +225,6 @@ impl Store {
                 .execute()
                 .await?
         };
-        t.delete(&format!("key = '{}'", key.replace('\'', "''")))
-            .await?;
         let batch = RecordBatch::try_new(
             store_meta_schema(),
             vec![
@@ -216,7 +232,12 @@ impl Store {
                 Arc::new(StringArray::from(vec![value.to_string()])),
             ],
         )?;
-        t.add(vec![batch]).execute().await?;
+        let reader = arrow_array::RecordBatchIterator::new(vec![Ok(batch)], store_meta_schema());
+        let mut merge = t.merge_insert(&["key"]);
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
+        merge.execute(Box::new(reader)).await?;
         Ok(())
     }
 
@@ -248,6 +269,6 @@ impl Store {
 }
 
 enum Version {
-    Current,
+    Current(u32),
     Empty,
 }

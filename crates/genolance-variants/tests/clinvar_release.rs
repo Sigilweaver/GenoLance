@@ -43,7 +43,13 @@ chr1\t100\t1\tA\tG\t.\t.\tCLNSIG=Pathogenic\n";
             opt(Some("Benign")),
             opt(None),
             opt(None),
-            opt(None),
+            arrow_array::new_null_array(
+                clinvar_schema()
+                    .field_with_name("gene_symbols")
+                    .unwrap()
+                    .data_type(),
+                1,
+            ),
             Arc::new(UInt64Array::from(vec![100u64])),
             Arc::new(StringArray::from(vec!["A"])),
             Arc::new(StringArray::from(vec!["G"])),

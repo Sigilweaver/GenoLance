@@ -29,11 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filename.
 - A failed ingest removes the rows it wrote. A sample is registered only
   after its file was read completely.
-- INFO and FORMAT values are stored as written in the file: percent-encoded
-  text, `;` inside FORMAT strings, float precision, and `K=.` round-trip
-  through `export` unchanged. Float-typed or negative DP/GQ are kept in
-  `format_extra` instead of being dropped. `format_extra` values now escape
-  `%`, `;` and `=` as `%25`, `%3B`, `%3D`.
+- INFO and FORMAT values are stored as written in the file (the `info_raw`,
+  `format_keys` and `format_raw` columns): percent-encoded text, `;` inside
+  FORMAT strings, float precision, trailing fields a record leaves out, and
+  `K=.` round-trip through `export` unchanged. Float-typed or negative DP/GQ
+  stay in the raw sample column and are counted in the ingest summary; the
+  typed `read_depth`/`format_gq` columns stay empty for them.
 - Records with POS 0 or ALT `.` are still skipped, and the ingest summary now
   prints how many.
 
@@ -104,29 +105,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   truncated or inconsistent, and 4 when the store's format version or layout
   is not supported.
 
-- The store records a format version. `genolance` refuses a store written by a
-  newer version (exit code 4), and a store written before format versions
-  (all earlier releases): it cannot be upgraded in place, so rebuild it by
-  ingesting the VCFs and the ClinVar release into a new store directory.
-  Commands that only read a store no longer create the directory when the path
-  is wrong; they fail with exit code 4.
+- The store records a format version, `MAJOR.MINOR`. A store with another
+  major is refused with exit code 4. A store from before format versions (all
+  earlier releases) cannot be upgraded in place: rebuild it by ingesting the
+  VCFs and the ClinVar release into a new store directory. The same major is
+  readable at any minor and a newer minor is read-only; a new minor only adds
+  nullable columns and metadata keys, and a command that needs a column an
+  older store lacks stops with an error naming the table and column. Commands
+  that only read a store no longer create the directory when the path is
+  wrong; they fail with exit code 2.
 - A sample (or the ClinVar release) whose ingest was interrupted is registered
   as incomplete, and every command refuses the store until it is re-ingested
   with `--replace`.
 - `genolance export` writes the FORMAT and sample columns exactly as they were
   ingested, and tells records that share a position apart by their source
   record, so several multi-allelic records at one position export correctly.
-- Alleles are joined to ClinVar by a trimmed form of (pos, ref, alt), so a
-  multi-allelic split that keeps the shared REF (`GCA>GA`) matches ClinVar's
-  `GC>G`. The ingest summary counts the alleles whose key differs.
-- Every gene of a ClinVar `GENEINFO` record is stored and searched
-  (`query --gene`, `--genes`, `--acmg`, `pgx`, `compound-het`), not only the
-  first.
-- `join`, `screen`, `compound-het` and `pgx` print the stored ClinVar release
-  and compare contig lengths in the sample and ClinVar headers. A mismatch (for
-  example GRCh37 samples against a GRCh38 release), or no contig to compare,
-  is an error (exit code 3); `--skip-reference-check` turns the check off. A
-  sample name that is not registered is an error in these commands.
+- Alleles are joined to ClinVar by an upper-cased, trimmed form of (pos, ref,
+  alt), so a multi-allelic split that keeps the shared REF (`GCA>GA`) matches
+  ClinVar's `GC>G`, and lower-case (soft-masked) bases match. The key is
+  parsimonious, not left-aligned: normalise inputs with
+  `bcftools norm -f <reference.fa>` so a deletion in a repeat is written the
+  way ClinVar writes it. The ingest summary counts the alleles whose key
+  differs and the symbolic, breakend and `*` alleles, which cannot be trimmed.
+- Every gene of a ClinVar `GENEINFO` record is stored (a list column) and
+  searched, ignoring case (`query --gene`, `--genes`, `--acmg`, `pgx`,
+  `compound-het`), not only the first. `query --gene` joins on the normalized
+  position and fails for a symbol ClinVar does not have.
+- The reference assembly of each sample and of the ClinVar release is
+  recorded at ingest: from the declared `##contig` lengths (matched against
+  built-in GRCh37 and GRCh38 primary-contig lengths) and the `##reference`
+  line, or declared with `ingest --assembly GRCh37|GRCh38|T2T-CHM13` (real
+  ClinVar files have `##reference=GRCh38` and no `##contig` lines).
+  `join`, `screen`, `compound-het` and `pgx` print the stored ClinVar release
+  and assembly and refuse a sample on another assembly (exit code 3). If an
+  assembly cannot be determined on either side they stop and say to declare it
+  with `--assembly`. `--skip-reference-check` lets the command run and prints
+  a warning, with what the check would have said, every time. `compare` and
+  merged `export` refuse samples on different assemblies; `annotate` checks
+  the annotation file the same way and warns when it cannot tell. A sample
+  name that is not registered is an error in these commands.
 - Float-typed or negative DP/GQ no longer need special handling: the sample
   column is stored as written, and the ingest summary counts the values that
   stay out of the typed columns.

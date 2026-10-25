@@ -21,7 +21,7 @@ async fn opening_a_missing_path_fails_and_creates_nothing() {
     let p = t.path("nope");
     let e = open_err(&p).await;
     assert!(matches!(e.root(), Error::StoreNotFound { .. }), "{e}");
-    assert_eq!(e.exit_code(), 4);
+    assert_eq!(e.exit_code(), 2);
     assert!(!Path::new(&p).exists());
 }
 
@@ -48,6 +48,66 @@ async fn a_store_without_a_format_version_must_be_rebuilt() {
     assert!(matches!(e.root(), Error::StoreTooOld { .. }), "{e}");
 }
 
+// The compatibility rule: another major is refused; a newer minor of the same
+// major can be read but not written; garbage is refused as unversioned.
+#[tokio::test]
+async fn format_version_rule_major_minor() {
+    let t = Tmp::new();
+    write_plain(
+        &t.path("a.vcf"),
+        &vcf("S1", &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"]),
+    );
+    ingest_file(&t.store(), &t.path("a.vcf")).await.unwrap();
+    let store = Store::open_or_create(&t.store()).await.unwrap();
+    assert_eq!(store.format_minor, 0);
+
+    store.set_meta(META_FORMAT_VERSION, "1.7").await.unwrap();
+    assert!(Store::open(&t.store()).await.is_ok(), "newer minor reads");
+    write_plain(
+        &t.path("b.vcf"),
+        &vcf("S2", &["chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1"]),
+    );
+    let e = ingest_file(&t.store(), &t.path("b.vcf")).await.unwrap_err();
+    assert!(matches!(e.root(), Error::StoreTooNew { .. }), "{e}");
+
+    store.set_meta(META_FORMAT_VERSION, "2.0").await.unwrap();
+    let e = open_err(&t.store()).await;
+    assert!(matches!(e.root(), Error::StoreTooNew { .. }), "{e}");
+
+    store.set_meta(META_FORMAT_VERSION, "0.9").await.unwrap();
+    let e = open_err(&t.store()).await;
+    assert!(matches!(e.root(), Error::StoreTooOld { .. }), "{e}");
+
+    store.set_meta(META_FORMAT_VERSION, "banana").await.unwrap();
+    let e = open_err(&t.store()).await;
+    assert!(matches!(e.root(), Error::StoreTooOld { .. }), "{e}");
+}
+
+// S2: an interrupted ClinVar replace is refused until it is redone.
+#[tokio::test]
+async fn an_incomplete_clinvar_release_blocks_opening_until_replaced() {
+    let t = Tmp::new();
+    let cv = "##fileformat=VCFv4.2\n##reference=GRCh38\n\
+##INFO=<ID=CLNSIG,Number=.,Type=String,Description=\"s\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+1\t100\t1\tA\tG\t.\t.\tCLNSIG=Pathogenic\n";
+    write_plain(&t.path("cv.vcf"), cv);
+    ingest_file(&t.store(), &t.path("cv.vcf")).await.unwrap();
+    let store = Store::open(&t.store()).await.unwrap();
+    store
+        .set_meta(genolance_core::schema::META_CLINVAR_STATE, "incomplete")
+        .await
+        .unwrap();
+    drop(store);
+    let e = open_err(&t.store()).await;
+    assert!(matches!(e.root(), Error::IncompleteIngest { .. }), "{e}");
+    let opts = IngestOptions::new().with_replace(true);
+    ingest::run(&t.store(), &[t.path("cv.vcf")], &opts)
+        .await
+        .unwrap();
+    assert!(Store::open(&t.store()).await.is_ok());
+}
+
 #[tokio::test]
 async fn a_newer_store_is_rejected() {
     let t = Tmp::new();
@@ -57,7 +117,7 @@ async fn a_newer_store_is_rejected() {
     );
     ingest_file(&t.store(), &t.path("a.vcf")).await.unwrap();
     let store = Store::open_or_create(&t.store()).await.unwrap();
-    store.set_meta(META_FORMAT_VERSION, "99").await.unwrap();
+    store.set_meta(META_FORMAT_VERSION, "99.0").await.unwrap();
     drop(store);
     let e = open_err(&t.store()).await;
     assert!(matches!(e.root(), Error::StoreTooNew { .. }), "{e}");

@@ -1,4 +1,6 @@
-use arrow_array::{Array, RecordBatch, StringArray, UInt64Array};
+use std::collections::HashSet;
+
+use arrow_array::{Array, RecordBatch};
 use futures::TryStreamExt;
 use genolance_core::{Error, Result};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
@@ -7,7 +9,8 @@ use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
 
 use crate::common::{
-    chrom_forms, chrom_predicate, fmt_dp, fmt_qual, opt_string, req_f32, req_str, req_u32, req_u64,
+    chrom_predicate, fmt_dp, fmt_qual, gene_match_predicate, normalize_chrom, opt_string, req_f32,
+    req_str, req_u32, req_u64,
 };
 
 /// Output format of `genolance query`.
@@ -70,26 +73,35 @@ pub async fn run(
         predicates.push(format!("pos <= {e}"));
     }
 
-    // Gene → positions via ClinVar.
+    // Gene -> positions via ClinVar (normalized positions, so a left-trimmed
+    // call matches ClinVar's representation).
+    let mut members: Option<HashSet<(String, u64)>> = None;
     if let Some(g) = gene {
         if !table_names.iter().any(|n| n == CLINVAR_TABLE) {
-            return Err(invalid!(
-                "--gene requires a '{CLINVAR_TABLE}' table; ingest clinvar.vcf.gz first"
+            return Err(Error::missing_table(
+                CLINVAR_TABLE,
+                "--gene needs ClinVar; ingest clinvar.vcf.gz first",
             ));
         }
         let cv = store.variants.open_table(CLINVAR_TABLE).execute().await?;
         let stream = cv
             .query()
-            .only_if(format!("gene_symbols LIKE '%|{}|%'", sql_escape(g)))
-            .select(Select::columns(&["chrom", "pos"]))
+            .only_if(gene_match_predicate(&[g.to_string()])?)
+            .select(Select::columns(&["chrom", "norm_pos"]))
             .execute()
             .await?;
         let batches: Vec<RecordBatch> = stream.try_collect().await?;
-        let positions = collect_chrom_pos(&batches);
+        let positions = collect_chrom_pos(&batches)?;
         if positions.is_empty() {
             return Err(Error::unknown_gene(vec![g.to_string()]));
         }
         predicates.push(region_predicate(&positions));
+        members = Some(
+            positions
+                .iter()
+                .map(|(c, p)| (normalize_chrom(c), *p))
+                .collect(),
+        );
     }
 
     let mut q = variants.query();
@@ -100,59 +112,43 @@ pub async fn run(
     let batches: Vec<RecordBatch> = stream.try_collect().await?;
 
     match output_format {
-        OutputFormat::Json => print_json(&batches)?,
-        OutputFormat::Table => print_table(&batches)?,
+        OutputFormat::Json => print_json(&batches, members.as_ref())?,
+        OutputFormat::Table => print_table(&batches, members.as_ref())?,
     }
     Ok(())
 }
 
-fn sql_escape(s: &str) -> String {
-    s.replace('\'', "''")
-}
-
-fn collect_chrom_pos(batches: &[RecordBatch]) -> Vec<(String, u64)> {
+fn collect_chrom_pos(batches: &[RecordBatch]) -> Result<Vec<(String, u64)>> {
     let mut out = Vec::new();
     for b in batches {
-        let chrom = b
-            .column_by_name("chrom")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-        let pos = b
-            .column_by_name("pos")
-            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
-        if let (Some(chrom), Some(pos)) = (chrom, pos) {
-            for i in 0..b.num_rows() {
-                out.push((chrom.value(i).to_string(), pos.value(i)));
-            }
+        let chrom = req_str(b, CLINVAR_TABLE, "chrom")?;
+        let pos = req_u64(b, CLINVAR_TABLE, "norm_pos")?;
+        for i in 0..b.num_rows() {
+            out.push((chrom.value(i).to_string(), pos.value(i)));
         }
     }
     out.sort();
     out.dedup();
-    out
+    Ok(out)
 }
 
-/// Build a SQL predicate for `(chrom, pos)` pairs.
-///
-/// To keep the predicate compact we group positions by chromosome. ClinVar
-/// uses unprefixed chromosome names ("1") while most sample VCFs use
-/// "chr1"; we match either form.
+/// A coarse SQL predicate for the gene: per chromosome, the span from the
+/// first to the last ClinVar position. The exact positions are checked while
+/// printing, so a very large gene does not become a huge `IN` list.
 fn region_predicate(positions: &[(String, u64)]) -> String {
     use std::collections::BTreeMap;
-    let mut by_chrom: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut by_chrom: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     for (c, p) in positions {
-        by_chrom.entry(c.clone()).or_default().push(*p);
+        let e = by_chrom.entry(normalize_chrom(c)).or_insert((*p, *p));
+        e.0 = e.0.min(*p);
+        e.1 = e.1.max(*p);
     }
     let clauses: Vec<String> = by_chrom
         .into_iter()
-        .map(|(c, ps)| {
-            let in_list: Vec<String> = ps.iter().map(|p| p.to_string()).collect();
-            let names: Vec<String> = chrom_forms(&c)
-                .iter()
-                .map(|f| format!("chrom = '{}'", sql_escape(f)))
-                .collect();
+        .map(|(c, (lo, hi))| {
             format!(
-                "(({}) AND pos IN ({}))",
-                names.join(" OR "),
-                in_list.join(",")
+                "({} AND norm_pos BETWEEN {lo} AND {hi})",
+                chrom_predicate(&c)
             )
         })
         .collect();
@@ -163,7 +159,7 @@ fn region_predicate(positions: &[(String, u64)]) -> String {
 // Output formatting
 // ---------------------------------------------------------------------------
 
-fn print_table(batches: &[RecordBatch]) -> Result<()> {
+fn print_table(batches: &[RecordBatch], members: Option<&HashSet<(String, u64)>>) -> Result<()> {
     let mut total = 0usize;
     println!(
         "{:<16} {:<8} {:<12} {:<6} {:<6} {:<8} {:<10} {:<6}",
@@ -180,8 +176,12 @@ fn print_table(batches: &[RecordBatch]) -> Result<()> {
         let qual = req_f32(b, t, "quality")?;
         let gt = req_str(b, t, "genotype")?;
         let dp = req_u32(b, t, "read_depth")?;
+        let npos = req_u64(b, t, "norm_pos")?;
 
         for i in 0..b.num_rows() {
+            if !is_member(members, chrom.value(i), npos.value(i)) {
+                continue;
+            }
             total += 1;
             if total > 100 {
                 continue;
@@ -209,7 +209,7 @@ fn print_table(batches: &[RecordBatch]) -> Result<()> {
 }
 
 /// One JSON object per row, properly escaped; a missing genotype is `null`.
-fn print_json(batches: &[RecordBatch]) -> Result<()> {
+fn print_json(batches: &[RecordBatch], members: Option<&HashSet<(String, u64)>>) -> Result<()> {
     for b in batches {
         let t = VARIANTS_TABLE;
         let sample = req_str(b, t, "sample_name")?;
@@ -218,7 +218,11 @@ fn print_json(batches: &[RecordBatch]) -> Result<()> {
         let ref_a = req_str(b, t, "ref_allele")?;
         let alt_a = req_str(b, t, "alt_allele")?;
         let gt = req_str(b, t, "genotype")?;
+        let npos = req_u64(b, t, "norm_pos")?;
         for i in 0..b.num_rows() {
+            if !is_member(members, chrom.value(i), npos.value(i)) {
+                continue;
+            }
             let row = serde_json::json!({
                 "sample": sample.value(i),
                 "chrom": chrom.value(i),
@@ -231,6 +235,10 @@ fn print_json(batches: &[RecordBatch]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_member(members: Option<&HashSet<(String, u64)>>, chrom: &str, npos: u64) -> bool {
+    members.is_none_or(|m| m.contains(&(normalize_chrom(chrom), npos)))
 }
 
 fn truncate(s: &str, n: usize) -> String {

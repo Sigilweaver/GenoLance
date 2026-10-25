@@ -63,9 +63,13 @@ pub fn clinvar_schema() -> Arc<Schema> {
         Field::new("clinical_significance", DataType::Utf8, true),
         Field::new("review_status", DataType::Utf8, true),
         Field::new("disease_name", DataType::Utf8, true),
-        // Every gene symbol of GENEINFO as "|SYM1|SYM2|" (leading and trailing
-        // bar), so `gene_symbols LIKE '%|BRCA2|%'` matches whole symbols.
-        Field::new("gene_symbols", DataType::Utf8, true),
+        // Every gene symbol of GENEINFO, in file order; null when the record
+        // has no GENEINFO. `gene_symbol` is the first one.
+        Field::new(
+            "gene_symbols",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        ),
         Field::new("norm_pos", DataType::UInt64, false),
         Field::new("norm_ref", DataType::Utf8, false),
         Field::new("norm_alt", DataType::Utf8, false),
@@ -88,6 +92,9 @@ pub fn samples_schema() -> Arc<Schema> {
         // contigs that declare a length). Used to check the reference against
         // the ClinVar release.
         Field::new("contigs", DataType::Utf8, true),
+        // Reference assembly label ("GRCh37", "GRCh38", ...) inferred from the
+        // header or declared with `--assembly`; null when unknown.
+        Field::new("assembly", DataType::Utf8, true),
     ]))
 }
 
@@ -125,8 +132,27 @@ pub const META_CLINVAR_RELEASE: &str = "clinvar_release";
 pub const META_CLINVAR_SOURCE: &str = "clinvar_source";
 /// Metadata key: ClinVar `##reference`.
 pub const META_CLINVAR_REFERENCE: &str = "clinvar_reference";
+/// Metadata key: ClinVar assembly label (absent when unknown).
+pub const META_CLINVAR_ASSEMBLY: &str = "clinvar_assembly";
 /// Metadata key: ClinVar contig lengths as "name:length,name:length".
 pub const META_CLINVAR_CONTIGS: &str = "clinvar_contigs";
 
-/// Current store format version. A store with another version is rejected.
-pub const STORE_FORMAT_VERSION: u32 = 1;
+/// Store format version, `MAJOR.MINOR`, recorded in `store_meta`.
+///
+/// Compatibility rule:
+/// - A different MAJOR is refused (newer: upgrade genolance; older: the store
+///   cannot be upgraded in place and must be rebuilt).
+/// - The same MAJOR with any MINOR can be read. A new MINOR only adds nullable
+///   columns and metadata keys; a command that needs a column an older store
+///   lacks stops with `Error::MissingColumn`, naming the table and column.
+/// - Writing (ingest) needs a MINOR equal to the build's: a store with a newer
+///   MINOR is read-only for this build.
+/// - Changing or removing a column, or changing what a value means, bumps MAJOR.
+pub const STORE_FORMAT_MAJOR: u32 = 1;
+/// See [`STORE_FORMAT_MAJOR`].
+pub const STORE_FORMAT_MINOR: u32 = 0;
+
+/// The format version this build writes, as stored in `store_meta`.
+pub fn store_format_version() -> String {
+    format!("{STORE_FORMAT_MAJOR}.{STORE_FORMAT_MINOR}")
+}

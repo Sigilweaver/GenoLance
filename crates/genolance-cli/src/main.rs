@@ -39,6 +39,12 @@ enum Commands {
         /// Ingest the file as a ClinVar release even without an INFO/CLNSIG header
         #[arg(long)]
         clinvar: bool,
+
+        /// Reference assembly of the file (GRCh37, GRCh38, T2T-CHM13), for
+        /// files whose header does not make it recognisable (no ##contig
+        /// lengths and no ##reference naming it)
+        #[arg(long)]
+        assembly: Option<String>,
     },
 
     /// Query variants from a GenoLance store
@@ -364,6 +370,7 @@ async fn run(cli: Cli) -> genolance_core::Result<()> {
             sample_column,
             replace,
             clinvar,
+            assembly,
         } => {
             let mut opts = genolance_variants::ingest::IngestOptions::new()
                 .with_replace(replace)
@@ -373,6 +380,9 @@ async fn run(cli: Cli) -> genolance_core::Result<()> {
             }
             if let Some(c) = sample_column {
                 opts = opts.with_sample_column(c);
+            }
+            if let Some(a) = assembly {
+                opts = opts.with_assembly(a);
             }
             genolance_variants::ingest::run(&store, &files, &opts).await?;
         }

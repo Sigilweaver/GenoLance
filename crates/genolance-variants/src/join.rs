@@ -1,9 +1,11 @@
 use arrow_array::{Array, RecordBatch};
 use futures::TryStreamExt;
-use genolance_core::{Error, Result};
+use genolance_core::{Error, Result, ResultExt};
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
+use genolance_core::schema::{
+    CLINVAR_TABLE, META_CLINVAR_RELEASE, META_CLINVAR_SOURCE, VARIANTS_TABLE,
+};
 use genolance_core::store::Store;
 
 use crate::common::{
@@ -36,11 +38,28 @@ pub async fn run(store_path: &str, annotation_vcf: Option<&str>, f: &Filters) ->
     let have_clinvar = tables.iter().any(|n| n == CLINVAR_TABLE);
     match (have_clinvar, annotation_vcf) {
         (true, Some(file)) => {
-            return Err(invalid!(
-                "the store already holds a ClinVar release, so `join` would ignore {file}; \
-                 drop --against to use the stored release, or load the file with \
-                 `genolance ingest --replace {file}`"
-            ));
+            // Fine if it is the file already loaded (same name and ##fileDate).
+            let (mut reader, _tail) =
+                crate::ingest::open_vcf_reader(file).with_context(|| format!("opening {file}"))?;
+            let header = reader
+                .read_header()
+                .with_context(|| format!("reading header of {file}"))?;
+            let file_date = crate::ingest::file_date(&header);
+            let name = std::path::Path::new(file)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(file);
+            let stored_source = store.meta(META_CLINVAR_SOURCE).await?;
+            let stored_date = store.meta(META_CLINVAR_RELEASE).await?;
+            if stored_source.as_deref() != Some(name) || stored_date != file_date {
+                return Err(Error::InvalidArgument(format!(
+                    "the store holds ClinVar release {} (from {}), so `join` would ignore {file}; \
+                     drop --against to use the stored release, or load the file with \
+                     `genolance ingest --replace {file}`",
+                    stored_date.as_deref().unwrap_or("with no ##fileDate"),
+                    stored_source.as_deref().unwrap_or("an unknown file"),
+                )));
+            }
         }
         (false, None) => {
             return Err(invalid!(

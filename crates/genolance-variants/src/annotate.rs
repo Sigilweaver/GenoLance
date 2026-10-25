@@ -88,6 +88,30 @@ pub async fn run(
         ));
     }
 
+    // The annotation file must be on the sample's assembly.
+    {
+        let ann = crate::ingest::header_assembly(&header, None)?;
+        let reg = crate::common::load_registry(&store).await?;
+        let sample_assembly = reg
+            .iter()
+            .find(|r| r.name == sample_name)
+            .and_then(|r| r.assembly);
+        match (sample_assembly, ann.assembly) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(Error::reference_mismatch(
+                    sample_name,
+                    format!("the sample is {a} but {annotation_vcf} is {b}; use an annotation file for {a}"),
+                ));
+            }
+            (Some(_), Some(_)) => {}
+            (sa, aa) => eprintln!(
+                "[annotate] WARNING: cannot verify the assembly (sample: {}, {annotation_vcf}: {}); positions are assumed to match",
+                sa.map(|a| a.to_string()).unwrap_or_else(|| "unknown".into()),
+                aa.map(|a| a.to_string()).unwrap_or_else(|| "unknown".into()),
+            ),
+        }
+    }
+
     // 1. Pull sample variants for the region.
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
     let mut preds = vec![format!("sample_name = '{}'", sql_escape(sample_name))];

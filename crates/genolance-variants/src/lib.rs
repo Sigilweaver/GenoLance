@@ -6,6 +6,7 @@ macro_rules! invalid {
 }
 
 pub mod annotate;
+mod assembly;
 mod common;
 pub mod compare;
 pub mod compound;

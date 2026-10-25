@@ -9,7 +9,8 @@ use genolance_core::schema::VARIANTS_TABLE;
 use genolance_core::store::Store;
 
 use crate::common::{
-    carrier_state, normalize_chrom, opt_string, req_str, req_u64, require_samples, Carrier,
+    carrier_state, check_samples_agree, normalize_chrom, opt_string, req_str, req_u64,
+    require_samples, Carrier,
 };
 
 type Key = (String, u64, String, String);
@@ -27,6 +28,7 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
 
     let store = Store::open(store_path).await?;
     require_samples(&store, samples).await?;
+    check_samples_agree(&store, samples, "compare").await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(Error::missing_table(VARIANTS_TABLE, "ingest samples first"));

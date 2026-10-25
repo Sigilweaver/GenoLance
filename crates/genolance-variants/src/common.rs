@@ -7,12 +7,14 @@ use arrow_array::{Array, Float32Array, RecordBatch, StringArray, UInt32Array, UI
 use futures::TryStreamExt;
 use genolance_core::gene_lists::{gene_in_set, ACMG_SF_V3};
 use genolance_core::schema::{
-    CLINVAR_TABLE, META_CLINVAR_CONTIGS, META_CLINVAR_RELEASE, META_CLINVAR_SOURCE, SAMPLES_TABLE,
+    CLINVAR_TABLE, META_CLINVAR_ASSEMBLY, META_CLINVAR_CONTIGS, META_CLINVAR_RELEASE,
+    META_CLINVAR_SOURCE, SAMPLES_TABLE,
 };
 use genolance_core::store::Store;
 use genolance_core::{Error, Result};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
+use crate::assembly::Assembly;
 use crate::filters::Filters;
 
 pub(crate) fn sql_escape(s: &str) -> String {
@@ -120,9 +122,17 @@ pub(crate) async fn require_samples(store: &Store, names: &[String]) -> Result<(
 /// Trim a REF/ALT pair the way `bcftools norm` does: drop trailing bases the
 /// two share, then leading bases (moving POS), always keeping one base.
 /// Symbolic (`<DEL>`), breakend and `*` alleles are returned unchanged.
+/// Bases are upper-cased first (VCF bases are case-insensitive, so a
+/// soft-masked `acgt` must match ClinVar's `ACGT`).
+///
+/// The result is parsimonious (minimal), not left-aligned: without the
+/// reference sequence a caller's right-aligned deletion in a repeat gets a
+/// different key from ClinVar's left-aligned one. Normalise inputs with
+/// `bcftools norm -f <reference.fa>` first.
 pub(crate) fn normalize_alleles(pos: u64, r: &str, a: &str) -> (u64, String, String) {
-    if a.starts_with('<') || a.contains('[') || a.contains(']') || a == "*" || a == "." {
-        return (pos, r.to_string(), a.to_string());
+    let (r, a) = (r.to_ascii_uppercase(), a.to_ascii_uppercase());
+    if is_unnormalizable(&a) {
+        return (pos, r, a);
     }
     let (mut rb, mut ab) = (r.as_bytes(), a.as_bytes());
     while rb.len() > 1 && ab.len() > 1 && rb.last() == ab.last() {
@@ -142,14 +152,57 @@ pub(crate) fn normalize_alleles(pos: u64, r: &str, a: &str) -> (u64, String, Str
     )
 }
 
-/// SQL predicate matching ClinVar rows whose `gene_symbols` contain any of
-/// the given symbols as a whole symbol.
-pub(crate) fn gene_match_predicate(genes: &[String]) -> String {
-    let ors: Vec<String> = genes
-        .iter()
-        .map(|g| format!("gene_symbols LIKE '%|{}|%'", sql_escape(g)))
-        .collect();
-    format!("({})", ors.join(" OR "))
+/// Gene symbols as ClinVar writes them: letters, digits and `- . @ + '`.
+/// Anything else cannot be a real symbol (and would be a LIKE wildcard).
+fn plausible_symbol(g: &str) -> bool {
+    !g.is_empty()
+        && g.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '@' | '+' | '\''))
+}
+
+/// SQL predicate matching ClinVar rows whose `gene_symbols` list contains any
+/// of the given symbols, ignoring case. Fails for a symbol that cannot occur in
+/// ClinVar, naming it, instead of building a pattern from it.
+pub(crate) fn gene_match_predicate(genes: &[String]) -> Result<String> {
+    let mut ors = Vec::new();
+    for g in genes {
+        if !plausible_symbol(g) {
+            return Err(Error::unknown_gene(vec![g.clone()]));
+        }
+        ors.push(format!(
+            "lower(concat('|', array_to_string(gene_symbols, '|'), '|')) LIKE '%|{}|%'",
+            sql_escape(&g.to_lowercase())
+        ));
+    }
+    Ok(format!("({})", ors.join(" OR ")))
+}
+
+/// The symbols of a `List<Utf8>` cell.
+pub(crate) fn list_strings(a: &arrow_array::ListArray, i: usize) -> Vec<String> {
+    if a.is_null(i) {
+        return Vec::new();
+    }
+    let values = a.value(i);
+    match values.as_any().downcast_ref::<StringArray>() {
+        Some(sa) => (0..sa.len()).map(|j| sa.value(j).to_string()).collect(),
+        None => Vec::new(),
+    }
+}
+
+pub(crate) fn req_list<'a>(
+    b: &'a RecordBatch,
+    table: &str,
+    name: &str,
+) -> Result<&'a arrow_array::ListArray> {
+    b.column_by_name(name)
+        .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>())
+        .ok_or_else(|| missing_column(table, name))
+}
+
+/// Symbolic (`<DEL>`), breakend and `*` alleles cannot be trimmed and are
+/// joined as written; ingest counts them.
+pub(crate) fn is_unnormalizable(a: &str) -> bool {
+    a.starts_with('<') || a.contains('[') || a.contains(']') || a == "*" || a == "."
 }
 
 pub(crate) fn fmt_qual(q: Option<f32>) -> String {
@@ -268,7 +321,7 @@ pub(crate) type Key = (String, u64, String, String);
 
 #[derive(Debug)]
 pub(crate) struct Annotation {
-    /// Every gene symbol of the record, `|`-joined (None if it has none).
+    /// Every gene symbol of the record, `,`-joined for display (None if it has none).
     pub gene_symbol: Option<String>,
     pub genes: Vec<String>,
     pub clinical_significance: Option<String>,
@@ -286,16 +339,11 @@ pub(crate) fn build_clinvar_map(
         let npos = req_u64(b, t, "norm_pos")?;
         let nref = req_str(b, t, "norm_ref")?;
         let nalt = req_str(b, t, "norm_alt")?;
-        let gene = req_str(b, t, "gene_symbols")?;
+        let gene = req_list(b, t, "gene_symbols")?;
         let sig = req_str(b, t, "clinical_significance")?;
         let dis = req_str(b, t, "disease_name")?;
         for i in 0..b.num_rows() {
-            let genes: Vec<String> = opt_string(gene, i)
-                .unwrap_or_default()
-                .split('|')
-                .filter(|g| !g.is_empty())
-                .map(str::to_string)
-                .collect();
+            let genes: Vec<String> = list_strings(gene, i);
             if f.acmg_only && !genes.iter().any(|g| gene_in_set(g, ACMG_SF_V3)) {
                 continue;
             }
@@ -317,7 +365,7 @@ pub(crate) fn build_clinvar_map(
                 gene_symbol: if genes.is_empty() {
                     None
                 } else {
-                    Some(genes.join("|"))
+                    Some(genes.join(","))
                 },
                 genes,
                 clinical_significance: opt_string(sig, i),
@@ -350,12 +398,47 @@ fn parse_contigs(s: &str) -> HashMap<String, u64> {
         .collect()
 }
 
-/// Print the stored ClinVar release and check that every sample in scope
-/// was made against the same assembly as ClinVar, by comparing the lengths
-/// of the contigs both headers declare. A mismatch, or no contig to compare,
-/// is an error unless `f.skip_reference_check` is set. `samples` of `None`
-/// means every registered sample. Also fails for a sample that is not
-/// registered.
+/// A registered sample as far as the reference checks need it.
+pub(crate) struct Registered {
+    pub name: String,
+    pub contigs: HashMap<String, u64>,
+    pub assembly: Option<Assembly>,
+}
+
+pub(crate) async fn load_registry(store: &Store) -> Result<Vec<Registered>> {
+    let reg = store.conn.open_table(SAMPLES_TABLE).execute().await?;
+    let batches: Vec<RecordBatch> = reg.query().execute().await?.try_collect().await?;
+    let mut out = Vec::new();
+    for b in &batches {
+        let names = req_str(b, SAMPLES_TABLE, "sample_name")?;
+        let contigs = req_str(b, SAMPLES_TABLE, "contigs")?;
+        let assembly = req_str(b, SAMPLES_TABLE, "assembly")?;
+        for i in 0..b.num_rows() {
+            out.push(Registered {
+                name: names.value(i).to_string(),
+                contigs: parse_contigs(&opt_string(contigs, i).unwrap_or_default()),
+                assembly: opt_string(assembly, i).and_then(|l| Assembly::from_label(&l)),
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn label(a: Option<Assembly>) -> String {
+    a.map(|a| a.to_string()).unwrap_or_else(|| "unknown".into())
+}
+
+/// Print the stored ClinVar release and check that every sample in scope was
+/// made against the same assembly as ClinVar.
+///
+/// The assembly of each side was inferred at ingest from its contig lengths
+/// and `##reference` line (see the `assembly` module) or declared with
+/// `--assembly`. Equal labels pass, different labels fail. If either is
+/// unknown, the lengths of contigs both headers declare are compared; if there
+/// are none, the check fails and says how to declare the assembly. With
+/// `f.skip_reference_check` the same check runs and its outcome is printed as
+/// a warning, but never stops the command. `samples` of `None` means every
+/// registered sample. A sample that is not registered is an error.
 pub(crate) async fn check_reference(
     store: &Store,
     samples: Option<&[String]>,
@@ -365,54 +448,121 @@ pub(crate) async fn check_reference(
     let release = store
         .meta(META_CLINVAR_RELEASE)
         .await?
-        .unwrap_or_else(|| "unknown".into());
+        .unwrap_or_else(|| "unknown (the file has no ##fileDate)".into());
     let source = store.meta(META_CLINVAR_SOURCE).await?.unwrap_or_default();
-    eprintln!("[{cmd}] ClinVar release: {release} ({source})");
+    let cv_assembly = store
+        .meta(META_CLINVAR_ASSEMBLY)
+        .await?
+        .and_then(|l| Assembly::from_label(&l));
+    eprintln!(
+        "[{cmd}] ClinVar release: {release} ({source}), assembly {}",
+        label(cv_assembly)
+    );
 
     let cv_contigs = parse_contigs(&store.meta(META_CLINVAR_CONTIGS).await?.unwrap_or_default());
-    let reg = store.conn.open_table(SAMPLES_TABLE).execute().await?;
-    let batches: Vec<RecordBatch> = reg.query().execute().await?.try_collect().await?;
-    let mut registered: Vec<(String, HashMap<String, u64>)> = Vec::new();
-    for b in &batches {
-        let names = req_str(b, SAMPLES_TABLE, "sample_name")?;
-        let contigs = req_str(b, SAMPLES_TABLE, "contigs")?;
-        for i in 0..b.num_rows() {
-            registered.push((
-                names.value(i).to_string(),
-                parse_contigs(&opt_string(contigs, i).unwrap_or_default()),
-            ));
-        }
-    }
+    let registered = load_registry(store).await?;
     if let Some(wanted) = samples {
         for w in wanted {
-            if !registered.iter().any(|(n, _)| n == w) {
+            if !registered.iter().any(|r| &r.name == w) {
                 return Err(Error::unknown_sample(
                     w.clone(),
-                    registered.iter().map(|(n, _)| n.clone()).collect(),
+                    registered.iter().map(|r| r.name.clone()).collect(),
                 ));
             }
         }
     }
-    if f.skip_reference_check {
-        return Ok(());
-    }
-    for (name, contigs) in &registered {
-        if samples.is_some_and(|w| !w.contains(name)) {
+    let mut failure: Option<(String, String)> = None;
+    for r in &registered {
+        if samples.is_some_and(|w| !w.contains(&r.name)) {
             continue;
         }
-        let mut shared = 0usize;
-        for (chrom, len) in contigs {
-            if let Some(cv_len) = cv_contigs.get(chrom) {
-                shared += 1;
-                if cv_len != len {
-                    return Err(Error::reference_mismatch(name.clone(), format!(
-                            "contig {chrom} is {len} bases in the sample's header but {cv_len} in the ClinVar header; they are different assemblies (ClinVar release {release})"
-                        )));
-                }
+        if let Err(detail) = compare_with_clinvar(r, cv_assembly, &cv_contigs, &release) {
+            failure = Some((r.name.clone(), detail));
+            break;
+        }
+    }
+    match (failure, f.skip_reference_check) {
+        (None, false) => Ok(()),
+        (None, true) => {
+            eprintln!(
+                "[{cmd}] WARNING: --skip-reference-check is set; the reference check was not enforced (it would have passed)"
+            );
+            Ok(())
+        }
+        (Some((sample, detail)), true) => {
+            eprintln!(
+                "[{cmd}] WARNING: --skip-reference-check is set; the reference check was not enforced. For sample '{sample}' it would have failed: {detail}"
+            );
+            Ok(())
+        }
+        (Some((sample, detail)), false) => Err(Error::reference_mismatch(sample, detail)),
+    }
+}
+
+fn compare_with_clinvar(
+    r: &Registered,
+    cv_assembly: Option<Assembly>,
+    cv_contigs: &HashMap<String, u64>,
+    release: &str,
+) -> std::result::Result<(), String> {
+    if let (Some(sa), Some(ca)) = (r.assembly, cv_assembly) {
+        return if sa == ca {
+            Ok(())
+        } else {
+            Err(format!(
+                "the sample is {sa} but the ClinVar release {release} is {ca}; use a ClinVar release for {sa}"
+            ))
+        };
+    }
+    let mut shared = 0usize;
+    for (chrom, len) in &r.contigs {
+        if let Some(cv_len) = cv_contigs.get(chrom) {
+            shared += 1;
+            if cv_len != len {
+                return Err(format!(
+                    "contig {chrom} is {len} bases in the sample's header but {cv_len} in the ClinVar header; they are different assemblies"
+                ));
             }
         }
-        if shared == 0 {
-            return Err(Error::reference_mismatch(name.clone(), "no contig with a declared length is shared with the ClinVar header, so the assembly cannot be verified; pass --skip-reference-check to proceed anyway"));
+    }
+    if shared > 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "cannot tell whether the sample and ClinVar use the same assembly (sample: {}, ClinVar: {}). Declare the assembly of the one that is unknown by re-ingesting it with `--assembly GRCh37` or `--assembly GRCh38` (and `--replace`), or pass --skip-reference-check",
+        label(r.assembly),
+        label(cv_assembly)
+    ))
+}
+
+/// Check that the listed samples were made against one assembly. Known and
+/// different is an error; unknown is a printed warning (the commands using
+/// this never read ClinVar, so there is nothing to declare against).
+pub(crate) async fn check_samples_agree(
+    store: &Store,
+    samples: &[String],
+    cmd: &str,
+) -> Result<()> {
+    let registered = load_registry(store).await?;
+    let picked: Vec<&Registered> = registered
+        .iter()
+        .filter(|r| samples.contains(&r.name))
+        .collect();
+    let mut first: Option<(&str, Assembly)> = None;
+    for r in &picked {
+        match (r.assembly, first) {
+            (Some(a), None) => first = Some((&r.name, a)),
+            (Some(a), Some((n0, a0))) if a != a0 => {
+                return Err(Error::reference_mismatch(
+                    r.name.clone(),
+                    format!("sample '{}' is {a} but sample '{n0}' is {a0}; their positions are not comparable", r.name),
+                ));
+            }
+            (None, _) => eprintln!(
+                "[{cmd}] WARNING: the assembly of sample '{}' is unknown; its positions are assumed to match the other samples'",
+                r.name
+            ),
+            _ => {}
         }
     }
     Ok(())
@@ -614,10 +764,19 @@ pub(crate) mod testutil {
         let col = |f: fn(&Row) -> String| {
             Arc::new(StringArray::from(rows.iter().map(f).collect::<Vec<_>>()))
         };
-        let genes: Vec<Option<String>> = rows
-            .iter()
-            .map(|r| (!r.4.is_empty()).then(|| format!("|{}|", r.4)))
-            .collect();
+        let genes = {
+            use arrow_array::builder::{ListBuilder, StringBuilder};
+            let mut b = ListBuilder::new(StringBuilder::new());
+            for r in rows {
+                if r.4.is_empty() {
+                    b.append(false);
+                } else {
+                    b.values().append_value(r.4);
+                    b.append(true);
+                }
+            }
+            b.finish()
+        };
         let first: Vec<Option<String>> = rows
             .iter()
             .map(|r| (!r.4.is_empty()).then(|| r.4.to_string()))
@@ -636,7 +795,7 @@ pub(crate) mod testutil {
                 col(|r| r.5.to_string()),
                 Arc::new(StringArray::from(vec![None::<String>; rows.len()])),
                 col(|r| r.6.to_string()),
-                Arc::new(StringArray::from(genes)),
+                Arc::new(genes),
                 Arc::new(UInt64Array::from(
                     rows.iter().map(|r| r.1).collect::<Vec<_>>(),
                 )),

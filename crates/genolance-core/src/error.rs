@@ -108,9 +108,9 @@ pub enum Error {
     StoreNotFound { path: String },
 
     /// The store was written by a newer GenoLance.
-    #[error("store format version {found} is newer than this build supports ({supported}); upgrade genolance")]
+    #[error("store format version {found} is newer than this build supports ({supported}); upgrade genolance (a store with a newer minor version can be read but not written to)")]
     #[non_exhaustive]
-    StoreTooNew { found: String, supported: u32 },
+    StoreTooNew { found: String, supported: String },
 
     /// The store predates format versions or uses an older one.
     #[error("store {path} has format version {found}, this build needs {supported}; it cannot be upgraded in place. Rebuild it: ingest your VCFs and the ClinVar release into a new store directory with `genolance ingest -s <new-dir> ...`")]
@@ -118,7 +118,7 @@ pub enum Error {
     StoreTooOld {
         path: String,
         found: String,
-        supported: u32,
+        supported: String,
     },
 
     /// A table lacks a column this version reads (or has it with another
@@ -261,22 +261,22 @@ impl Error {
         Error::StoreNotFound { path: path.into() }
     }
 
-    pub fn store_too_new(found: impl Into<String>, supported: u32) -> Error {
+    pub fn store_too_new(found: impl Into<String>, supported: impl Into<String>) -> Error {
         Error::StoreTooNew {
             found: found.into(),
-            supported,
+            supported: supported.into(),
         }
     }
 
     pub fn store_too_old(
         path: impl Into<String>,
         found: impl Into<String>,
-        supported: u32,
+        supported: impl Into<String>,
     ) -> Error {
         Error::StoreTooOld {
             path: path.into(),
             found: found.into(),
-            supported,
+            supported: supported.into(),
         }
     }
 
@@ -385,8 +385,11 @@ mod tests {
             3
         );
         // 4: store format or layout.
-        assert_eq!(Error::store_too_new("9", 1).exit_code(), 4);
-        assert_eq!(Error::store_too_old("p", "unversioned", 1).exit_code(), 4);
+        assert_eq!(Error::store_too_new("9.0", "1.0").exit_code(), 4);
+        assert_eq!(
+            Error::store_too_old("p", "unversioned", "1.0").exit_code(),
+            4
+        );
         assert_eq!(Error::missing_column("calls", "pos").exit_code(), 4);
         // 1: everything else, including context-wrapped storage errors.
         assert_eq!(Error::storage("boom").exit_code(), 1);

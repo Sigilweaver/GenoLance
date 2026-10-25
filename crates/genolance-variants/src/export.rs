@@ -17,7 +17,9 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 use genolance_core::schema::{SAMPLES_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
 
-use crate::common::{chrom_predicate, missing_column, normalize_chrom, require_samples};
+use crate::common::{
+    check_samples_agree, chrom_predicate, missing_column, normalize_chrom, require_samples,
+};
 
 /// Run `genolance export`.
 ///
@@ -503,6 +505,7 @@ pub async fn run_merge(
         return Err(Error::missing_table(VARIANTS_TABLE, "ingest it first"));
     }
     require_samples(&store, sample_names).await?;
+    check_samples_agree(&store, sample_names, "export").await?;
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
 
     // Per-sample records, indexed by sample position in sample_names.
