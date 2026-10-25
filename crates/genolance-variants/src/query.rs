@@ -5,6 +5,36 @@ use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
 use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
+use genolance_core::Error;
+
+use crate::common::{chrom_forms, chrom_predicate};
+
+/// Output format of `genolance query`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum OutputFormat {
+    /// Human-readable table (first 100 rows).
+    #[default]
+    Table,
+    /// One JSON object per row.
+    Json,
+    /// Arrow schema and batch summary.
+    Arrow,
+}
+
+impl std::str::FromStr for OutputFormat {
+    type Err = Error;
+    fn from_str(s: &str) -> std::result::Result<Self, Error> {
+        match s {
+            "table" => Ok(Self::Table),
+            "json" => Ok(Self::Json),
+            "arrow" => Ok(Self::Arrow),
+            other => Err(Error::InvalidArgument(format!(
+                "unknown output format '{other}'; expected table, json or arrow"
+            ))),
+        }
+    }
+}
 
 /// Query variants from a GenoLance store.
 ///
@@ -17,7 +47,7 @@ pub async fn run(
     chrom: Option<&str>,
     start: Option<u64>,
     end: Option<u64>,
-    output_format: &str,
+    output_format: OutputFormat,
 ) -> Result<()> {
     let store = Store::open(store_path).await?;
 
@@ -33,7 +63,7 @@ pub async fn run(
 
     // Region filters from CLI args.
     if let Some(c) = chrom {
-        predicates.push(format!("chrom = '{}'", sql_escape(c)));
+        predicates.push(chrom_predicate(c));
     }
     if let Some(s) = start {
         predicates.push(format!("pos >= {s}"));
@@ -73,9 +103,9 @@ pub async fn run(
     let batches: Vec<RecordBatch> = stream.try_collect().await?;
 
     match output_format {
-        "json" => print_json(&batches)?,
-        "arrow" => print_arrow(&batches),
-        _ => print_table(&batches),
+        OutputFormat::Json => print_json(&batches)?,
+        OutputFormat::Arrow => print_arrow(&batches),
+        OutputFormat::Table => print_table(&batches),
     }
     Ok(())
 }
@@ -119,16 +149,13 @@ fn region_predicate(positions: &[(String, u64)]) -> String {
         .into_iter()
         .map(|(c, ps)| {
             let in_list: Vec<String> = ps.iter().map(|p| p.to_string()).collect();
-            let bare = c.trim_start_matches("chr");
-            let prefixed = if c.starts_with("chr") {
-                c.clone()
-            } else {
-                format!("chr{c}")
-            };
+            let names: Vec<String> = chrom_forms(&c)
+                .iter()
+                .map(|f| format!("chrom = '{}'", sql_escape(f)))
+                .collect();
             format!(
-                "((chrom = '{}' OR chrom = '{}') AND pos IN ({}))",
-                sql_escape(bare),
-                sql_escape(&prefixed),
+                "(({}) AND pos IN ({}))",
+                names.join(" OR "),
                 in_list.join(",")
             )
         })

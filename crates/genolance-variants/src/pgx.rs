@@ -13,15 +13,20 @@
 //! variants for a clinician; *not* a diplotype call and *not*
 //! a prescribing recommendation.
 
-use std::collections::HashMap;
-
 use anyhow::{anyhow, Result};
-use arrow_array::{Array, RecordBatch, StringArray, UInt64Array};
+use arrow_array::{Array, RecordBatch};
 use futures::TryStreamExt;
-use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
 use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
+use genolance_core::Error;
+
+use crate::common::{
+    build_clinvar_map, carrier_state, ensure_clinvar_unique, normalize_chrom, opt_string, req_str,
+    req_u64, sql_escape, Carrier, Gate, Key,
+};
+use crate::filters::Filters;
 
 /// Genes with the strongest CPIC Tier 1 / Tier 2 guidance. Extend via
 /// `--genes` on the CLI if you want to include others.
@@ -37,9 +42,16 @@ const DEFAULT_PGX_GENES: &[&str] = &[
 /// ("response to X", "X response -").
 const PGX_NEEDLES: &[&str] = &["drug_response", "drug response", "response to "];
 
-type Key = (String, u64, String, String);
-
-pub async fn run(store_path: &str, sample: &str, extra_genes: &[String]) -> Result<()> {
+/// Screen `sample` against ClinVar drug-response annotations. `extra_genes`
+/// are added to the default list (case-insensitive); a gene with no ClinVar
+/// rows at all is an error. Calls whose FILTER is not PASS are excluded and
+/// counted unless `f.include_filtered` is set.
+pub async fn run(
+    store_path: &str,
+    sample: &str,
+    extra_genes: &[String],
+    f: &Filters,
+) -> Result<()> {
     let store = Store::open(store_path).await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
@@ -52,14 +64,57 @@ pub async fn run(store_path: &str, sample: &str, extra_genes: &[String]) -> Resu
     }
 
     let mut genes: Vec<String> = DEFAULT_PGX_GENES.iter().map(|s| s.to_string()).collect();
+    let mut requested: Vec<String> = Vec::new();
     for g in extra_genes {
-        if !genes.iter().any(|x| x.eq_ignore_ascii_case(g)) {
+        let g = g.trim().to_uppercase();
+        if g.is_empty() {
+            return Err(
+                Error::InvalidArgument("--genes contains an empty gene symbol".into()).into(),
+            );
+        }
+        if !genes.iter().any(|x| x.eq_ignore_ascii_case(&g)) {
             genes.push(g.clone());
         }
+        requested.push(g);
     }
 
     // 1. Pull ClinVar entries for PGx genes, filtered to drug-response rows.
     let clinvar = store.variants.open_table(CLINVAR_TABLE).execute().await?;
+    ensure_clinvar_unique(&clinvar).await?;
+    if !requested.is_empty() {
+        let in_list = requested
+            .iter()
+            .map(|g| format!("'{}'", sql_escape(g)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let found: Vec<RecordBatch> = clinvar
+            .query()
+            .only_if(format!("gene_symbol IN ({in_list})"))
+            .select(Select::columns(&["gene_symbol"]))
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for b in &found {
+            let col = req_str(b, CLINVAR_TABLE, "gene_symbol")?;
+            for i in 0..col.len() {
+                present.insert(col.value(i).to_string());
+            }
+        }
+        let missing: Vec<&String> = requested.iter().filter(|g| !present.contains(*g)).collect();
+        if !missing.is_empty() {
+            return Err(Error::InvalidArgument(format!(
+                "no ClinVar rows for requested gene(s): {}",
+                missing
+                    .iter()
+                    .map(|g| g.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .into());
+        }
+    }
     let gene_in = genes
         .iter()
         .map(|g| format!("'{}'", sql_escape(g)))
@@ -84,7 +139,7 @@ pub async fn run(store_path: &str, sample: &str, extra_genes: &[String]) -> Resu
         .await?
         .try_collect()
         .await?;
-    let cv_map = build_clinvar_map(&cv_batches);
+    let cv_map = build_clinvar_map(&cv_batches, &Filters::default())?;
     eprintln!(
         "[pgx] {} PGx ClinVar variants across {} genes",
         cv_map.len(),
@@ -106,40 +161,48 @@ pub async fn run(store_path: &str, sample: &str, extra_genes: &[String]) -> Resu
         .await?;
 
     let mut hits: Vec<Hit> = Vec::new();
+    let mut gate = Gate::new(f);
     for b in &v_batches {
-        let chrom = col_str(b, "chrom");
-        let pos = col_u64(b, "pos");
-        let ref_a = col_str(b, "ref_allele");
-        let alt_a = col_str(b, "alt_allele");
-        let gt = col_str(b, "genotype");
-        let (Some(chrom), Some(pos), Some(ref_a), Some(alt_a)) = (chrom, pos, ref_a, alt_a) else {
-            continue;
-        };
+        let t = VARIANTS_TABLE;
+        let chrom = req_str(b, t, "chrom")?;
+        let pos = req_u64(b, t, "pos")?;
+        let ref_a = req_str(b, t, "ref_allele")?;
+        let alt_a = req_str(b, t, "alt_allele")?;
+        let gt = req_str(b, t, "genotype")?;
+        let filter = req_str(b, t, "filter")?;
         for i in 0..b.num_rows() {
-            let gt_str = gt
-                .and_then(|g| (!g.is_null(i)).then(|| g.value(i).to_string()))
-                .unwrap_or_default();
-            if !gt_str.chars().any(|c| c == '1') {
-                continue;
-            }
+            let gt_str = opt_string(gt, i);
             let key: Key = (
                 normalize_chrom(chrom.value(i)),
                 pos.value(i),
                 ref_a.value(i).to_string(),
                 alt_a.value(i).to_string(),
             );
-            if let Some(ann) = cv_map.get(&key) {
-                hits.push(Hit {
-                    gene: ann.gene_symbol.clone().unwrap_or_default(),
-                    chrom: key.0.clone(),
-                    pos: key.1,
-                    ref_a: key.2.clone(),
-                    alt_a: key.3.clone(),
-                    genotype: gt_str,
-                    significance: ann.clinical_significance.clone().unwrap_or_default(),
-                    phenotype: ann.disease_name.clone().unwrap_or_default(),
-                });
+            let Some(ann) = cv_map.get(&key) else {
+                continue;
+            };
+            match carrier_state(gt_str.as_deref()) {
+                Carrier::Yes => {}
+                Carrier::No => continue,
+                Carrier::NoCall => {
+                    gate.no_call += 1;
+                    continue;
+                }
             }
+            let fl = opt_string(filter, i);
+            if !gate.admit(fl.as_deref(), None, None) {
+                continue;
+            }
+            hits.push(Hit {
+                gene: ann.gene_symbol.clone().unwrap_or_default(),
+                chrom: key.0.clone(),
+                pos: key.1,
+                ref_a: key.2.clone(),
+                alt_a: key.3.clone(),
+                genotype: gt_str.unwrap_or_default(),
+                significance: ann.clinical_significance.clone().unwrap_or_default(),
+                phenotype: ann.disease_name.clone().unwrap_or_default(),
+            });
         }
     }
 
@@ -175,6 +238,7 @@ pub async fn run(store_path: &str, sample: &str, extra_genes: &[String]) -> Resu
          recommendation. Review hits with a clinician against current CPIC \
          guidance (https://cpicpgx.org/)."
     );
+    gate.report("pgx");
     Ok(())
 }
 
@@ -189,60 +253,6 @@ struct Hit {
     phenotype: String,
 }
 
-struct Annotation {
-    gene_symbol: Option<String>,
-    clinical_significance: Option<String>,
-    disease_name: Option<String>,
-}
-
-fn build_clinvar_map(batches: &[RecordBatch]) -> HashMap<Key, Annotation> {
-    let mut map = HashMap::new();
-    for b in batches {
-        let chrom = col_str(b, "chrom");
-        let pos = col_u64(b, "pos");
-        let ref_a = col_str(b, "ref_allele");
-        let alt_a = col_str(b, "alt_allele");
-        let gene = col_str(b, "gene_symbol");
-        let sig = col_str(b, "clinical_significance");
-        let dis = col_str(b, "disease_name");
-        let (Some(chrom), Some(pos), Some(ref_a), Some(alt_a)) = (chrom, pos, ref_a, alt_a) else {
-            continue;
-        };
-        for i in 0..b.num_rows() {
-            let key: Key = (
-                normalize_chrom(chrom.value(i)),
-                pos.value(i),
-                ref_a.value(i).to_string(),
-                alt_a.value(i).to_string(),
-            );
-            map.insert(
-                key,
-                Annotation {
-                    gene_symbol: gene.and_then(|a| (!a.is_null(i)).then(|| a.value(i).to_string())),
-                    clinical_significance: sig
-                        .and_then(|a| (!a.is_null(i)).then(|| a.value(i).to_string())),
-                    disease_name: dis.and_then(|a| (!a.is_null(i)).then(|| a.value(i).to_string())),
-                },
-            );
-        }
-    }
-    map
-}
-
-fn col_str<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a StringArray> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-}
-fn col_u64<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a UInt64Array> {
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
-}
-fn normalize_chrom(c: &str) -> String {
-    c.strip_prefix("chr").unwrap_or(c).to_string()
-}
-fn sql_escape(s: &str) -> String {
-    s.replace('\'', "''")
-}
 fn trunc(s: &str, n: usize) -> String {
     if s.chars().count() > n {
         let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
