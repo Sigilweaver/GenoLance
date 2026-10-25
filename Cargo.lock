@@ -3930,23 +3930,7 @@ version = "0.118.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbc48a82baed442e5cb56837d5d6896d825a60612460562fb6e3e0229e375b3"
 dependencies = [
- "noodles-bcf",
  "noodles-bgzf",
- "noodles-csi",
- "noodles-vcf",
-]
-
-[[package]]
-name = "noodles-bcf"
-version = "0.93.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f4c577910b4907b6f19c48738eb14bbbd36da97d5415df9f8b1055527f7555f"
-dependencies = [
- "indexmap 2.14.0",
- "memchr",
- "noodles-bgzf",
- "noodles-core",
- "noodles-csi",
  "noodles-vcf",
 ]
 

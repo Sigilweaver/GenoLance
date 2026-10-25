@@ -26,7 +26,7 @@ or layout not supported.
 Validated against real DeepVariant WGS data (GRCh37, ~5.8M sites per
 sample). It currently supports:
 
-- `genolance ingest` - parse a VCF/BCF and write one Arrow row per
+- `genolance ingest` - parse a VCF (plain or BGZF-compressed; BCF is not supported) and write one Arrow row per
   (sample, chrom, pos, ref, alt). Multi-allelic sites are split.
   A VCF with no sample columns and an INFO/CLNSIG header (or any file
   given `--clinvar`) goes into a separate `clinvar` table; a second

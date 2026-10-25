@@ -39,10 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints how many.
 
 - `genolance export` returns an error instead of a wrong or empty VCF when:
-  the sample is not in the store (single and `--merge`), the store lacks an
+  the sample is not in the store (single and merged export), the store lacks an
   expected column, rows at one position cannot be assigned to source records
-  (several multi-allelic records with the same ALT count), or `--merge` finds
-  several records for one sample at a site (split-biallelic input).
+  (several multi-allelic records with the same ALT count), or a merged export
+  finds several records for one sample at a site (split-biallelic input).
 - `export --chrom` (single and merge) matches `chr17` and `17`, and a region
   filter that matches no rows is an error instead of an empty VCF. Merge
   export treats `chr1` and `1` as one contig and writes the first sample's
@@ -52,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line that kept only the first record's genotype and fields.
 - The exported `#CHROM` line names the exported sample (the stored name, which
   `--sample` on ingest may have changed).
-- `export --merge` re-indexes AD (Number=R) and PL (Number=G) to the merged
+- Merged export (repeated `--sample`) re-indexes AD (Number=R) and PL (Number=G) to the merged
   allele order, writes `.` for QUAL when samples disagree and for INFO unless
   all samples agree on it and on the ALT list, and uses the union of the
   samples' non-PASS FILTER values.
@@ -147,6 +147,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Float-typed or negative DP/GQ no longer need special handling: the sample
   column is stored as written, and the ingest summary counts the values that
   stay out of the typed columns.
+
+- BCF input is not supported and is now rejected with a clear message (exit
+  code 3); the README and command help no longer claim it, and the unused
+  `noodles` `bcf` and `csi` features are dropped.
+- `export --merge` is removed; repeat `--sample` to merge samples. A single
+  `--sample` always exports that sample alone.
 
 ### API breaks
 
