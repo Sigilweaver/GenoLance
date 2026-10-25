@@ -90,9 +90,7 @@ pub async fn run(
         let batches: Vec<RecordBatch> = stream.try_collect().await?;
         let positions = collect_chrom_pos(&batches);
         if positions.is_empty() {
-            return Err(invalid!(
-                "no ClinVar rows for gene '{g}' (symbols match case-insensitively); check the spelling"
-            ));
+            return Err(Error::unknown_gene(vec![g.to_string()]));
         }
         predicates.push(region_predicate(&positions));
     }

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use arrow_array::RecordBatch;
 use futures::TryStreamExt;
-use genolance_core::Result;
+use genolance_core::{Error, Result};
 use lancedb::query::{ExecutableQuery, QueryBase};
 
 use genolance_core::schema::VARIANTS_TABLE;
@@ -27,9 +27,7 @@ pub async fn run(store_path: &str, samples: &[String], mode: &str) -> Result<()>
     require_samples(&store, samples).await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
-        return Err(invalid!(
-            "store has no '{VARIANTS_TABLE}' table; ingest samples first"
-        ));
+        return Err(Error::missing_table(VARIANTS_TABLE, "ingest samples first"));
     }
     let table = store.variants.open_table(VARIANTS_TABLE).execute().await?;
 

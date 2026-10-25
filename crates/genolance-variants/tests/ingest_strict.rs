@@ -269,7 +269,7 @@ async fn clinvar_reingest_requires_replace() {
         .unwrap_err();
     assert!(matches!(
         ingest_error(&e),
-        Error::ClinVarReleasePresent { existing: 1 }
+        Error::ClinVarReleasePresent { existing: 1, .. }
     ));
     assert_eq!(clinvar_count(&t.store()).await, 1);
 

@@ -54,11 +54,12 @@ pub async fn run(
     let store = Store::open(store_path).await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
-        return Err(invalid!("store has no '{VARIANTS_TABLE}' table"));
+        return Err(Error::missing_table(VARIANTS_TABLE, "ingest it first"));
     }
     if !tables.iter().any(|n| n == CLINVAR_TABLE) {
-        return Err(invalid!(
-            "store has no '{CLINVAR_TABLE}' table; ingest clinvar.vcf.gz first"
+        return Err(Error::missing_table(
+            CLINVAR_TABLE,
+            "ingest clinvar.vcf.gz first",
         ));
     }
 
@@ -103,14 +104,9 @@ pub async fn run(
         }
         let missing: Vec<&String> = requested.iter().filter(|g| !present.contains(*g)).collect();
         if !missing.is_empty() {
-            return Err(Error::InvalidArgument(format!(
-                "no ClinVar rows for requested gene(s): {}",
-                missing
-                    .iter()
-                    .map(|g| g.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
+            return Err(Error::unknown_gene(
+                missing.iter().map(|g| g.to_string()).collect(),
+            ));
         }
     }
     let gene_in = genes

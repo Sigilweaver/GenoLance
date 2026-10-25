@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use arrow_array::{Array, RecordBatch};
 use futures::TryStreamExt;
-use genolance_core::Result;
+use genolance_core::{Error, Result};
 use lancedb::query::{ExecutableQuery, QueryBase};
 
 use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
@@ -40,13 +40,15 @@ pub async fn run(store_path: &str, samples: &[String], f: &Filters) -> Result<()
     let store = Store::open(store_path).await?;
     let tables = store.variants.table_names().execute().await?;
     if !tables.iter().any(|n| n == VARIANTS_TABLE) {
-        return Err(invalid!(
-            "store has no '{VARIANTS_TABLE}' table; ingest sample VCFs first"
+        return Err(Error::missing_table(
+            VARIANTS_TABLE,
+            "ingest sample VCFs first",
         ));
     }
     if !tables.iter().any(|n| n == CLINVAR_TABLE) {
-        return Err(invalid!(
-            "store has no '{CLINVAR_TABLE}' table; ingest clinvar.vcf.gz first"
+        return Err(Error::missing_table(
+            CLINVAR_TABLE,
+            "ingest clinvar.vcf.gz first",
         ));
     }
 

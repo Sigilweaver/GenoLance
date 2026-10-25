@@ -15,9 +15,11 @@ GenomicsDB.
 
 ## Exit codes
 
-`0` success; `1` internal, I/O or storage error; `2` usage error or a request that
-cannot be honoured as written; `3` input data or store contents rejected;
-`4` store format version not supported.
+`0` success; `1` internal, I/O or storage-engine error; `2` usage error or a
+request that cannot be honoured as written (unknown sample or gene, missing
+table, empty region, duplicate sample, missing store); `3` input data or stored
+data rejected as malformed, truncated or inconsistent; `4` store format version
+or layout not supported.
 
 ## Status
 

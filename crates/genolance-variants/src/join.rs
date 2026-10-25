@@ -1,6 +1,6 @@
 use arrow_array::{Array, RecordBatch};
 use futures::TryStreamExt;
-use genolance_core::Result;
+use genolance_core::{Error, Result};
 use lancedb::query::{ExecutableQuery, QueryBase};
 
 use genolance_core::schema::{CLINVAR_TABLE, VARIANTS_TABLE};
@@ -67,8 +67,9 @@ pub async fn run(store_path: &str, annotation_vcf: Option<&str>, f: &Filters) ->
             .iter()
             .any(|n| n == VARIANTS_TABLE)
     {
-        return Err(invalid!(
-            "store has no '{VARIANTS_TABLE}' table; ingest a sample VCF first"
+        return Err(Error::missing_table(
+            VARIANTS_TABLE,
+            "ingest a sample VCF first",
         ));
     }
 
