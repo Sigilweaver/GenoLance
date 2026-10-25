@@ -37,6 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Records with POS 0 or ALT `.` are still skipped, and the ingest summary now
   prints how many.
 
+- `genolance export` returns an error instead of a wrong or empty VCF when:
+  the sample is not in the store (single and `--merge`), the store lacks an
+  expected column, rows at one position cannot be assigned to source records
+  (several multi-allelic records with the same ALT count), or `--merge` finds
+  several records for one sample at a site (split-biallelic input).
+- `export` keeps records that share a position separate (for example VCFs
+  split with `bcftools norm -m-`) instead of merging them into one multi-ALT
+  line that kept only the first record's genotype and fields.
+- The exported `#CHROM` line names the exported sample (the stored name, which
+  `--sample` on ingest may have changed).
+- `export --merge` re-indexes AD (Number=R) and PL (Number=G) to the merged
+  allele order, writes `.` for QUAL when samples disagree and for INFO unless
+  all samples agree on it and on the ALT list, and uses the union of the
+  samples' non-PASS FILTER values.
+
 ### API breaks
 
 - `ingest::run` takes `&IngestOptions` instead of `Option<&str>` and returns

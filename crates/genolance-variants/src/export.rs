@@ -16,6 +16,7 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 
 use genolance_core::schema::{SAMPLES_TABLE, VARIANTS_TABLE};
 use genolance_core::store::Store;
+use genolance_core::Error;
 
 /// Run `genolance export`.
 ///
@@ -38,13 +39,10 @@ pub async fn run(
         ));
     }
 
-    // 1. Header
-    let root_tables = store.conn.table_names().execute().await?;
-    let header_text = if root_tables.iter().any(|n| n == SAMPLES_TABLE) {
-        load_sample_header(&store, sample_name).await?
-    } else {
-        None
-    };
+    // 1. Header. The sample must be registered; an unknown name is an error,
+    // not an empty VCF.
+    require_samples(&store, std::slice::from_ref(&sample_name.to_string())).await?;
+    let header_text = load_sample_header(&store, sample_name).await?;
 
     // 2. Variants for this sample, with optional region filter.
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
@@ -69,7 +67,7 @@ pub async fn run(
     // 3. Flatten to owned rows, sort, group, emit.
     let mut rows: Vec<Row> = Vec::new();
     for b in &batches {
-        collect_rows(b, &mut rows);
+        collect_rows(b, &mut rows)?;
     }
     // Stable sort by (chrom, pos, ref, alt_index) - rows of the same site
     // land contiguous in alt_index order for group_consecutive().
@@ -82,6 +80,10 @@ pub async fn run(
         ))
     });
 
+    // Group rows into source records before any output is created, so a
+    // store that cannot be exported faithfully fails without a partial file.
+    let records = split_records(&rows)?;
+
     let writer: Box<dyn Write> = match output_path {
         Some(p) => Box::new(BufWriter::new(
             std::fs::File::create(p).with_context(|| format!("creating {p}"))?,
@@ -90,17 +92,16 @@ pub async fn run(
     };
     let mut w = writer;
 
-    // 4. Emit header.
+    // 4. Emit header; the #CHROM line carries the stored sample name.
     if let Some(text) = header_text {
-        // Header already ends in newline(s) from noodles serializer.
-        w.write_all(text.as_bytes())?;
+        write_header_for_sample(&mut w, &text, sample_name)?;
     } else {
         write_minimal_header(&mut w, sample_name)?;
     }
 
-    // 5. Emit data lines, one per site.
+    // 5. Emit data lines, one per source record.
     let mut sites = 0usize;
-    for site in group_consecutive(&rows) {
+    for site in &records {
         write_site(&mut w, site, sample_name)?;
         sites += 1;
     }
@@ -138,6 +139,62 @@ async fn load_sample_header(store: &Store, sample_name: &str) -> Result<Option<S
     Ok(None)
 }
 
+/// Fail with `Error::UnknownSample` unless every name is in the `samples`
+/// registry.
+async fn require_samples(store: &Store, names: &[String]) -> Result<()> {
+    let root_tables = store.conn.table_names().execute().await?;
+    let mut available: Vec<String> = Vec::new();
+    if root_tables.iter().any(|n| n == SAMPLES_TABLE) {
+        let samples = store.conn.open_table(SAMPLES_TABLE).execute().await?;
+        let batches: Vec<RecordBatch> = samples.query().execute().await?.try_collect().await?;
+        for b in &batches {
+            let col = col_str(b, "sample_name")
+                .ok_or_else(|| missing_column("samples", "sample_name"))?;
+            for i in 0..col.len() {
+                available.push(col.value(i).to_string());
+            }
+        }
+    }
+    for n in names {
+        if !available.iter().any(|a| a == n) {
+            return Err(Error::UnknownSample {
+                name: n.clone(),
+                available,
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn missing_column(table: &str, column: &str) -> anyhow::Error {
+    Error::InvalidArgument(format!(
+        "table '{table}' has no column '{column}' of the expected type; the store was written by an incompatible version"
+    ))
+    .into()
+}
+
+/// Write a stored header with its `#CHROM` line rewritten to name exactly
+/// the exported sample.
+fn write_header_for_sample<W: Write>(w: &mut W, text: &str, sample_name: &str) -> Result<()> {
+    let mut saw_chrom = false;
+    for line in text.lines() {
+        if line.starts_with("#CHROM") {
+            let fixed: Vec<&str> = line.split('\t').take(9).collect();
+            writeln!(w, "{}\t{sample_name}", fixed.join("\t"))?;
+            saw_chrom = true;
+        } else {
+            writeln!(w, "{line}")?;
+        }
+    }
+    if !saw_chrom {
+        return Err(anyhow!(
+            "stored header for '{sample_name}' has no #CHROM line"
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Row extraction + grouping
 // ---------------------------------------------------------------------------
@@ -149,6 +206,7 @@ struct Row {
     ref_allele: String,
     alt_allele: String,
     alt_index: u32,
+    alt_count: u32,
     quality: Option<f32>,
     filter: Option<String>,
     gt_raw: Option<String>,
@@ -161,29 +219,28 @@ struct Row {
     info_raw: Option<String>,
 }
 
-fn collect_rows(b: &RecordBatch, out: &mut Vec<Row>) {
-    let chrom = col_str(b, "chrom");
-    let pos = col_u64(b, "pos");
-    let ids = col_str(b, "ids");
-    let ref_a = col_str(b, "ref_allele");
-    let alt_a = col_str(b, "alt_allele");
-    let alt_index = col_u32(b, "alt_index");
-    let quality = col_f32(b, "quality");
-    let filter = col_str(b, "filter");
-    let gt_raw = col_str(b, "gt_raw");
-    let rd = col_u32(b, "read_depth");
-    let ad = col_str(b, "format_ad");
-    let gq = col_u32(b, "format_gq");
-    let pl = col_str(b, "format_pl");
-    let extra = col_str(b, "format_extra");
-    let key_order = col_str(b, "format_key_order");
-    let info_raw = col_str(b, "info_raw");
-
-    let (Some(chrom), Some(pos), Some(ref_a), Some(alt_a), Some(alt_index)) =
-        (chrom, pos, ref_a, alt_a, alt_index)
-    else {
-        return;
-    };
+/// Read the rows of one batch. Every column must be present with its
+/// expected type; a store that drifted from the schema is an error.
+fn collect_rows(b: &RecordBatch, out: &mut Vec<Row>) -> Result<()> {
+    let t = VARIANTS_TABLE;
+    let chrom = col_str(b, "chrom").ok_or_else(|| missing_column(t, "chrom"))?;
+    let pos = col_u64(b, "pos").ok_or_else(|| missing_column(t, "pos"))?;
+    let ids = Some(col_str(b, "ids").ok_or_else(|| missing_column(t, "ids"))?);
+    let ref_a = col_str(b, "ref_allele").ok_or_else(|| missing_column(t, "ref_allele"))?;
+    let alt_a = col_str(b, "alt_allele").ok_or_else(|| missing_column(t, "alt_allele"))?;
+    let alt_index = col_u32(b, "alt_index").ok_or_else(|| missing_column(t, "alt_index"))?;
+    let alt_count = col_u32(b, "alt_count").ok_or_else(|| missing_column(t, "alt_count"))?;
+    let quality = Some(col_f32(b, "quality").ok_or_else(|| missing_column(t, "quality"))?);
+    let filter = Some(col_str(b, "filter").ok_or_else(|| missing_column(t, "filter"))?);
+    let gt_raw = Some(col_str(b, "gt_raw").ok_or_else(|| missing_column(t, "gt_raw"))?);
+    let rd = Some(col_u32(b, "read_depth").ok_or_else(|| missing_column(t, "read_depth"))?);
+    let ad = Some(col_str(b, "format_ad").ok_or_else(|| missing_column(t, "format_ad"))?);
+    let gq = Some(col_u32(b, "format_gq").ok_or_else(|| missing_column(t, "format_gq"))?);
+    let pl = Some(col_str(b, "format_pl").ok_or_else(|| missing_column(t, "format_pl"))?);
+    let extra = Some(col_str(b, "format_extra").ok_or_else(|| missing_column(t, "format_extra"))?);
+    let key_order =
+        Some(col_str(b, "format_key_order").ok_or_else(|| missing_column(t, "format_key_order"))?);
+    let info_raw = Some(col_str(b, "info_raw").ok_or_else(|| missing_column(t, "info_raw"))?);
 
     for i in 0..b.num_rows() {
         out.push(Row {
@@ -193,6 +250,7 @@ fn collect_rows(b: &RecordBatch, out: &mut Vec<Row>) {
             ref_allele: ref_a.value(i).to_string(),
             alt_allele: alt_a.value(i).to_string(),
             alt_index: alt_index.value(i),
+            alt_count: alt_count.value(i),
             quality: f32_opt(quality, i),
             filter: str_opt(filter, i),
             gt_raw: str_opt(gt_raw, i),
@@ -205,37 +263,121 @@ fn collect_rows(b: &RecordBatch, out: &mut Vec<Row>) {
             info_raw: str_opt(info_raw, i),
         });
     }
+    Ok(())
 }
 
-/// Yield slices of consecutive rows sharing `(chrom, pos, ref_allele)`.
-fn group_consecutive(rows: &[Row]) -> impl Iterator<Item = &[Row]> {
-    let mut start = 0usize;
-    std::iter::from_fn(move || {
-        if start >= rows.len() {
-            return None;
+/// Rebuild source records from the per-ALT rows of one `(chrom, pos, ref)`.
+///
+/// A record is either one row with `alt_count == 1` (also what a
+/// split-biallelic input looks like, several of which can share a position)
+/// or `alt_count` rows with `alt_index` 0..alt_count. Anything else cannot be
+/// attributed to records without guessing and is an error.
+fn records_at_site<'a>(site: &[&'a Row]) -> Result<Vec<Vec<&'a Row>>> {
+    let head = site[0];
+    let ambiguous = |why: String| -> anyhow::Error {
+        Error::MalformedRecord {
+            chrom: head.chrom.clone(),
+            pos: head.pos,
+            field: "alt rows".into(),
+            reason: why,
         }
+        .into()
+    };
+    let mut records: Vec<Vec<&'a Row>> = Vec::new();
+    let mut by_count: BTreeMap<u32, Vec<&'a Row>> = BTreeMap::new();
+    for &r in site {
+        if r.alt_count == 0 {
+            return Err(ambiguous("row has alt_count 0".into()));
+        }
+        if r.alt_count == 1 {
+            if r.alt_index != 0 {
+                return Err(ambiguous(format!(
+                    "alt_index {} with alt_count 1",
+                    r.alt_index
+                )));
+            }
+            records.push(vec![r]);
+        } else {
+            by_count.entry(r.alt_count).or_default().push(r);
+        }
+    }
+    for (k, rows) in by_count {
+        if rows.len() != k as usize {
+            return Err(ambiguous(format!(
+                "{} rows with alt_count {k}; cannot tell which source records they belong to",
+                rows.len()
+            )));
+        }
+        let mut sorted = rows;
+        sorted.sort_by_key(|r| r.alt_index);
+        if sorted
+            .iter()
+            .enumerate()
+            .any(|(i, r)| r.alt_index as usize != i)
+        {
+            return Err(ambiguous(format!(
+                "alt_index values do not cover 0..{k} exactly once"
+            )));
+        }
+        records.push(sorted);
+    }
+    for rec in &records {
+        check_record_consistent(rec).map_err(|why| ambiguous(why))?;
+    }
+    Ok(records)
+}
+
+/// Rows of one record duplicate its site-level fields; they must agree.
+fn check_record_consistent(rec: &[&Row]) -> std::result::Result<(), String> {
+    let h = rec[0];
+    for r in &rec[1..] {
+        if r.gt_raw != h.gt_raw
+            || r.info_raw != h.info_raw
+            || r.quality != h.quality
+            || r.filter != h.filter
+            || r.ids != h.ids
+            || r.format_ad != h.format_ad
+            || r.format_pl != h.format_pl
+            || r.read_depth != h.read_depth
+            || r.format_gq != h.format_gq
+            || r.format_extra != h.format_extra
+        {
+            return Err(format!(
+                "rows for ALT {} and {} disagree on site-level fields",
+                h.alt_allele, r.alt_allele
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Split sorted rows into source records (see [`records_at_site`]).
+fn split_records(rows: &[Row]) -> Result<Vec<Vec<&Row>>> {
+    let refs: Vec<&Row> = rows.iter().collect();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while start < rows.len() {
         let head = &rows[start];
         let mut end = start + 1;
-        while end < rows.len() {
-            let r = &rows[end];
-            if r.chrom == head.chrom && r.pos == head.pos && r.ref_allele == head.ref_allele {
-                end += 1;
-            } else {
-                break;
-            }
+        while end < rows.len()
+            && rows[end].chrom == head.chrom
+            && rows[end].pos == head.pos
+            && rows[end].ref_allele == head.ref_allele
+        {
+            end += 1;
         }
-        let slice = &rows[start..end];
+        out.extend(records_at_site(&refs[start..end])?);
         start = end;
-        Some(slice)
-    })
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
 // VCF line emission
 // ---------------------------------------------------------------------------
 
-fn write_site<W: Write>(w: &mut W, site: &[Row], _sample_name: &str) -> Result<()> {
-    let head = &site[0];
+fn write_site<W: Write>(w: &mut W, site: &[&Row], _sample_name: &str) -> Result<()> {
+    let head = site[0];
 
     // ALTs in alt_index order (group_consecutive already sorted).
     let alts: Vec<&str> = site.iter().map(|r| r.alt_allele.as_str()).collect();
@@ -440,10 +582,17 @@ fn chrom_key(c: &str) -> (u8, u32, String) {
 ///
 /// Queries each requested sample, unions ALT alleles per site, renumbers
 /// allele indices consistently, and emits one VCF record per site with
-/// one FORMAT/SAMPLE column per listed sample (missing samples become
-/// `./.`). Field set is normalized to `GT:AD:DP:GQ:PL`; non-standard
-/// FORMAT fields (`format_extra`) are dropped during merge because their
-/// cardinality can disagree between samples at the same site.
+/// one FORMAT/SAMPLE column per listed sample (samples without the site
+/// get no-calls). GT, AD (Number=R) and PL (Number=G) are remapped to the
+/// merged allele order. Field set is normalized to `GT:AD:DP:GQ:PL`;
+/// non-standard FORMAT fields (`format_extra`) are dropped because their
+/// cardinality can disagree between samples at the same site. INFO is kept
+/// only when every sample at the site agrees on it and on the ALT list;
+/// otherwise it is `.`. FILTER is the union of the samples' non-PASS filters.
+///
+/// A sample must have at most one source record per `(chrom, pos, ref)`;
+/// several (split-biallelic input) cannot be merged without guessing and
+/// are an error.
 pub async fn run_merge(
     store_path: &str,
     sample_names: &[String],
@@ -463,10 +612,11 @@ pub async fn run_merge(
     if !var_tables.iter().any(|n| n == VARIANTS_TABLE) {
         return Err(anyhow!("store has no '{VARIANTS_TABLE}' table"));
     }
+    require_samples(&store, sample_names).await?;
     let variants = store.variants.open_table(VARIANTS_TABLE).execute().await?;
 
-    // Per-sample row collections, indexed by sample position in sample_names.
-    // Key: (chrom, pos, ref) -> Vec<Row>  (one Row per alt for that sample).
+    // Per-sample records, indexed by sample position in sample_names.
+    // Key: (chrom, pos, ref) -> the sample's single record (one Row per alt).
     let mut per_sample: Vec<BTreeMap<(String, u64, String), Vec<Row>>> =
         (0..sample_names.len()).map(|_| BTreeMap::new()).collect();
 
@@ -490,13 +640,41 @@ pub async fn run_merge(
             .await?;
         let mut rows: Vec<Row> = Vec::new();
         for b in &batches {
-            collect_rows(b, &mut rows);
+            collect_rows(b, &mut rows)?;
         }
+        rows.sort_by(|a, b| {
+            (&a.chrom, a.pos, &a.ref_allele, a.alt_index).cmp(&(
+                &b.chrom,
+                b.pos,
+                &b.ref_allele,
+                b.alt_index,
+            ))
+        });
+        // Group by site, then require exactly one record per site.
+        let mut groups: BTreeMap<(String, u64, String), Vec<Row>> = BTreeMap::new();
         for r in rows {
-            per_sample[idx]
+            groups
                 .entry((r.chrom.clone(), r.pos, r.ref_allele.clone()))
                 .or_default()
                 .push(r);
+        }
+        for (head_key, group) in groups {
+            let n_records = {
+                let refs: Vec<&Row> = group.iter().collect();
+                records_at_site(&refs)?.len()
+            };
+            if n_records != 1 {
+                return Err(Error::MalformedRecord {
+                    chrom: head_key.0,
+                    pos: head_key.1,
+                    field: "merge".into(),
+                    reason: format!(
+                        "sample '{s}' has {n_records} separate records at this position and reference (split multi-allelic input); they cannot be merged into one column without guessing"
+                    ),
+                }
+                .into());
+            }
+            per_sample[idx].insert(head_key, group);
         }
     }
 
@@ -506,7 +684,14 @@ pub async fn run_merge(
     sites.sort_by(|a, b| (chrom_key(&a.0), a.1, &a.2).cmp(&(chrom_key(&b.0), b.1, &b.2)));
     sites.dedup();
 
-    // Writer + header.
+    // Build every line first so a bad site fails before any output exists.
+    let mut lines: Vec<String> = Vec::new();
+    for key in &sites {
+        if let Some(line) = merged_site_line(&per_sample, key)? {
+            lines.push(line);
+        }
+    }
+
     let writer: Box<dyn Write> = match output_path {
         Some(p) => Box::new(BufWriter::new(
             std::fs::File::create(p).with_context(|| format!("creating {p}"))?,
@@ -515,15 +700,13 @@ pub async fn run_merge(
     };
     let mut w = writer;
     write_merge_header(&mut w, &store, sample_names).await?;
-
-    let mut emitted = 0usize;
-    for key in &sites {
-        write_merged_site(&mut w, &per_sample, sample_names, key)?;
-        emitted += 1;
+    for l in &lines {
+        writeln!(w, "{l}")?;
     }
     w.flush()?;
     eprintln!(
-        "[export --merge] wrote {emitted} sites for {} samples",
+        "[export --merge] wrote {} sites for {} samples",
+        lines.len(),
         sample_names.len()
     );
     Ok(())
@@ -580,114 +763,199 @@ async fn write_merge_header<W: Write>(w: &mut W, store: &Store, samples: &[Strin
     Ok(())
 }
 
-#[allow(clippy::type_complexity)]
-fn write_merged_site<W: Write>(
-    w: &mut W,
+fn merged_site_line(
     per_sample: &[BTreeMap<(String, u64, String), Vec<Row>>],
-    sample_names: &[String],
     key: &(String, u64, String),
-) -> Result<()> {
-    // Union of ALTs across samples, ordered by (alt_index, first-seen).
-    let mut merged_alts: Vec<String> = Vec::new();
+) -> Result<Option<String>> {
+    let mut present: Vec<Vec<&Row>> = Vec::new();
     for sm in per_sample {
         if let Some(rows) = sm.get(key) {
-            // Sort within-sample by alt_index for a stable order.
             let mut sorted: Vec<&Row> = rows.iter().collect();
             sorted.sort_by_key(|r| r.alt_index);
-            for r in sorted {
-                if !merged_alts.iter().any(|a| a == &r.alt_allele) {
-                    merged_alts.push(r.alt_allele.clone());
-                }
+            present.push(sorted);
+        }
+    }
+    // Union of ALTs across samples, in first-seen order.
+    let mut merged_alts: Vec<String> = Vec::new();
+    for rows in &present {
+        for r in rows {
+            if !merged_alts.iter().any(|a| a == &r.alt_allele) {
+                merged_alts.push(r.alt_allele.clone());
             }
         }
     }
     if merged_alts.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
-    // Pick ID, QUAL, FILTER, INFO from the first sample that has it.
-    // INFO is per-sample specific in our split storage, but we just take
-    // the first as a representative; downstream tools should recompute.
-    let mut rep_id = ".".to_string();
-    let mut rep_qual = ".".to_string();
-    let mut rep_filter = ".".to_string();
-    let mut rep_info = ".".to_string();
-    for sm in per_sample {
-        if let Some(rows) = sm.get(key) {
-            if let Some(r) = rows.iter().min_by_key(|r| r.alt_index) {
-                if let Some(i) = &r.ids {
-                    rep_id = i.clone();
+    // Site-level fields: keep a value only where every sample agrees.
+    let agree = |f: &dyn Fn(&Row) -> Option<String>| -> Option<String> {
+        let first = f(present[0][0]);
+        if present.iter().all(|rows| f(rows[0]) == first) {
+            first
+        } else {
+            None
+        }
+    };
+    let same_alts = present
+        .iter()
+        .all(|rows| rows.iter().map(|r| &r.alt_allele).eq(merged_alts.iter()));
+    let rep_info = if same_alts {
+        agree(&|r| r.info_raw.clone())
+    } else {
+        None
+    };
+    let rep_qual = agree(&|r| r.quality.map(format_qual));
+    let mut ids: Vec<String> = Vec::new();
+    for rows in &present {
+        if let Some(i) = &rows[0].ids {
+            for part in i.split(';') {
+                if !ids.iter().any(|e| e == part) {
+                    ids.push(part.to_string());
                 }
-                if let Some(q) = r.quality {
-                    rep_qual = format_qual(q);
-                }
-                if let Some(f) = &r.filter {
-                    rep_filter = f.clone();
-                }
-                if let Some(i) = &r.info_raw {
-                    rep_info = i.clone();
-                }
-                break;
             }
         }
     }
+    let mut failed: Vec<String> = Vec::new();
+    let mut any_pass = false;
+    for rows in &present {
+        match rows[0].filter.as_deref() {
+            Some("PASS") => any_pass = true,
+            Some(f) => {
+                for part in f.split(';') {
+                    if !failed.iter().any(|e| e == part) {
+                        failed.push(part.to_string());
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    let rep_filter = if !failed.is_empty() {
+        failed.join(";")
+    } else if any_pass {
+        "PASS".to_string()
+    } else {
+        ".".to_string()
+    };
 
-    // Per-sample FORMAT: fixed GT:AD:DP:GQ:PL.
-    let fmt_col = "GT:AD:DP:GQ:PL";
     let mut sample_cols: Vec<String> = Vec::new();
-    for (idx, sm) in per_sample.iter().enumerate() {
+    for sm in per_sample {
         let col = match sm.get(key) {
-            Some(rows) => build_merged_sample_column(rows, &merged_alts),
+            Some(rows) => build_merged_sample_column(rows, &merged_alts, key)?,
             None => missing_sample_column(),
         };
         sample_cols.push(col);
-        let _ = idx;
     }
 
-    writeln!(
-        w,
-        "{chrom}\t{pos}\t{id}\t{ref_a}\t{alt}\t{qual}\t{filter}\t{info}\t{fmt}\t{sample}",
+    Ok(Some(format!(
+        "{chrom}\t{pos}\t{id}\t{ref_a}\t{alt}\t{qual}\t{filter}\t{info}\tGT:AD:DP:GQ:PL\t{sample}",
         chrom = key.0,
         pos = key.1,
-        id = rep_id,
+        id = if ids.is_empty() {
+            ".".to_string()
+        } else {
+            ids.join(";")
+        },
         ref_a = key.2,
         alt = merged_alts.join(","),
-        qual = rep_qual,
+        qual = rep_qual.unwrap_or_else(|| ".".into()),
         filter = rep_filter,
-        info = rep_info,
-        fmt = fmt_col,
+        info = rep_info.unwrap_or_else(|| ".".into()),
         sample = sample_cols.join("\t"),
-    )?;
-    let _ = sample_names;
-    Ok(())
+    )))
 }
 
 /// Build a `GT:AD:DP:GQ:PL` column for one sample at one site, remapping
-/// the sample's local allele indices into the merged ALT ordering.
-fn build_merged_sample_column(rows: &[Row], merged_alts: &[String]) -> String {
-    // Map local alt_index (1-based in VCF) -> merged allele index.
-    // alt_index 0 is always REF, local indices >=1 correspond to the
-    // sample's own sorted alt rows.
+/// the sample's local allele indices into the merged ALT ordering. GT, AD
+/// (Number=R) and PL (Number=G) are all re-indexed.
+fn build_merged_sample_column(
+    rows: &[Row],
+    merged_alts: &[String],
+    key: &(String, u64, String),
+) -> Result<String> {
+    let bad = |field: &str, reason: String| -> anyhow::Error {
+        Error::MalformedRecord {
+            chrom: key.0.clone(),
+            pos: key.1,
+            field: field.into(),
+            reason,
+        }
+        .into()
+    };
     let mut sorted: Vec<&Row> = rows.iter().collect();
     sorted.sort_by_key(|r| r.alt_index);
-    let mut local_to_merged: Vec<u32> = vec![0]; // index 0 -> REF (0)
+    // local allele index (0 = REF) -> merged allele index
+    let mut local_to_merged: Vec<usize> = vec![0];
     for r in &sorted {
-        // Find the ALT in merged_alts; should always be present.
-        let merged_idx = merged_alts
+        let p = merged_alts
             .iter()
             .position(|a| a == &r.alt_allele)
-            .map(|p| (p + 1) as u32)
-            .unwrap_or(0);
-        local_to_merged.push(merged_idx);
+            .ok_or_else(|| {
+                bad(
+                    "ALT",
+                    format!("allele {} missing from merged list", r.alt_allele),
+                )
+            })?;
+        local_to_merged.push(p + 1);
     }
+    let identity = local_to_merged.len() == merged_alts.len() + 1
+        && local_to_merged.iter().enumerate().all(|(i, m)| i == *m);
+    let n_local = local_to_merged.len();
+    let n_merged = merged_alts.len() + 1;
 
-    // Remap GT string from the head row (all split rows share the same raw GT).
-    let head = &sorted[0];
+    let head = sorted[0];
     let gt = match &head.gt_raw {
-        Some(g) => remap_gt(g, &local_to_merged),
+        Some(g) => remap_gt(g, &local_to_merged).map_err(|e| bad("FORMAT/GT", e))?,
         None => "./.".to_string(),
     };
-    let ad = head.format_ad.clone().unwrap_or_else(|| ".".to_string());
+    let ad = match &head.format_ad {
+        None => ".".to_string(),
+        Some(v) if identity => v.clone(),
+        Some(v) => {
+            let vals: Vec<&str> = v.split(',').collect();
+            if vals.len() != n_local {
+                return Err(bad(
+                    "FORMAT/AD",
+                    format!("{} value(s) for {n_local} alleles", vals.len()),
+                ));
+            }
+            let mut out = vec!["."; n_merged];
+            for (i, val) in vals.iter().enumerate() {
+                out[local_to_merged[i]] = val;
+            }
+            out.join(",")
+        }
+    };
+    let pl = match &head.format_pl {
+        None => ".".to_string(),
+        Some(v) if identity => v.clone(),
+        Some(v) => {
+            let vals: Vec<&str> = v.split(',').collect();
+            if vals.len() != n_local * (n_local + 1) / 2 {
+                return Err(bad(
+                    "FORMAT/PL",
+                    format!(
+                        "{} value(s) is not the diploid genotype count for {n_local} alleles; cannot re-index",
+                        vals.len()
+                    ),
+                ));
+            }
+            let mut out = vec!["."; n_merged * (n_merged + 1) / 2];
+            let mut k = 0usize;
+            for b in 0..n_local {
+                for a in 0..=b {
+                    let (ma, mb) = {
+                        let (x, y) = (local_to_merged[a], local_to_merged[b]);
+                        (x.min(y), x.max(y))
+                    };
+                    out[mb * (mb + 1) / 2 + ma] = vals[k];
+                    k += 1;
+                }
+            }
+            out.join(",")
+        }
+    };
     let dp = head
         .read_depth
         .map(|x| x.to_string())
@@ -696,8 +964,7 @@ fn build_merged_sample_column(rows: &[Row], merged_alts: &[String]) -> String {
         .format_gq
         .map(|x| x.to_string())
         .unwrap_or_else(|| ".".to_string());
-    let pl = head.format_pl.clone().unwrap_or_else(|| ".".to_string());
-    format!("{gt}:{ad}:{dp}:{gq}:{pl}")
+    Ok(format!("{gt}:{ad}:{dp}:{gq}:{pl}"))
 }
 
 fn missing_sample_column() -> String {
@@ -705,31 +972,44 @@ fn missing_sample_column() -> String {
 }
 
 /// Remap allele indices in a GT string. Preserves phasing separators.
-/// Non-numeric tokens (e.g. ".") pass through unchanged.
-fn remap_gt(gt: &str, local_to_merged: &[u32]) -> String {
+/// `.` passes through; any other token must be a local allele index.
+fn remap_gt(gt: &str, local_to_merged: &[usize]) -> std::result::Result<String, String> {
     let mut out = String::with_capacity(gt.len());
     let mut token = String::new();
     for ch in gt.chars() {
         if ch == '|' || ch == '/' {
-            flush_allele(&mut token, &mut out, local_to_merged);
+            flush_allele(&mut token, &mut out, local_to_merged)?;
             out.push(ch);
         } else {
             token.push(ch);
         }
     }
-    flush_allele(&mut token, &mut out, local_to_merged);
-    out
+    flush_allele(&mut token, &mut out, local_to_merged)?;
+    Ok(out)
 }
 
-fn flush_allele(token: &mut String, out: &mut String, local_to_merged: &[u32]) {
+fn flush_allele(
+    token: &mut String,
+    out: &mut String,
+    local_to_merged: &[usize],
+) -> std::result::Result<(), String> {
     if token.is_empty() {
-        return;
+        return Ok(());
     }
-    if let Ok(n) = token.parse::<usize>() {
-        let merged = local_to_merged.get(n).copied().unwrap_or(n as u32);
-        out.push_str(&merged.to_string());
+    if token == "." {
+        out.push('.');
     } else {
-        out.push_str(token);
+        let n: usize = token
+            .parse()
+            .map_err(|_| format!("allele '{token}' is not an index"))?;
+        let merged = local_to_merged.get(n).ok_or_else(|| {
+            format!(
+                "allele {n} is beyond the sample's {} ALT(s)",
+                local_to_merged.len() - 1
+            )
+        })?;
+        out.push_str(&merged.to_string());
     }
     token.clear();
+    Ok(())
 }
