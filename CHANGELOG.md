@@ -183,6 +183,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Updated the transitive `zstd` 0.13.4, `zstd-safe` 7.4.0 and `zstd-sys`
+  2.1.2 (via `arrow-ipc` and `lance-encoding`) in the lockfile, fixing
+  RUSTSEC-2026-0391, RUSTSEC-2026-0398, RUSTSEC-2026-0403 and
+  RUSTSEC-2026-0410, plus the `zstd-safe` unsoundness warnings
+  RUSTSEC-2026-0395 through -0397, -0399 through -0402 and -0404 through
+  -0406. Lockfile-only change; no code or API changes.
 - Updated the transitive TLS dependencies to rustls 0.23.45 and
   rustls-webpki 0.103.15 to fix RUSTSEC-2026-0285.
 - Updated `quinn-proto` to 0.11.19, `rustls` to 0.23.46, and `rustls-webpki`
