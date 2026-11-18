@@ -354,3 +354,16 @@ async fn plain_gzip_and_fake_gz_are_not_reported_as_truncated() {
         .unwrap_err();
     assert!(format!("{e:#}").contains("gzip magic"), "{e:#}");
 }
+
+#[tokio::test]
+async fn lone_dot_format_key_is_stored_as_null() {
+    let t = Tmp::new();
+    let line = "chr1\t100\t.\tA\tG\t50\tPASS\tAF=0.5\t.\t.";
+    write_plain(&t.path("a.vcf"), &vcf("S1", &[line]));
+    ingest_file(&t.store(), &t.path("a.vcf")).await.unwrap();
+    assert_eq!(
+        calls_count(&t.store(), Some("format_keys IS NULL")).await,
+        1
+    );
+    assert_eq!(calls_count(&t.store(), Some("format_keys = '.'")).await, 0);
+}
