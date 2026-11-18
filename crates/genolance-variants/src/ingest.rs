@@ -1104,12 +1104,7 @@ fn extract_sample_format_fields(
     let raw_sample: &str = sample.as_ref();
 
     let mut out = SampleFormatFields {
-        keys: samples
-            .as_ref()
-            .split('\t')
-            .next()
-            .filter(|k| !k.is_empty())
-            .map(str::to_string),
+        keys: Some(samples.keys().iter().collect::<Vec<_>>().join(":")).filter(|k| !k.is_empty()),
         raw: Some(raw_sample.to_string()),
         ..Default::default()
     };
