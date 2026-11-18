@@ -148,7 +148,7 @@ The `variants` table:
 | `format_gq`   | UInt32     | FORMAT/GQ                                              |
 | `format_pl`   | Utf8       | FORMAT/PL, comma-joined                                |
 | `allele_freq` | Float32    | INFO/AF for this ALT (if present)                      |
-| `format_keys` | Utf8       | the FORMAT column exactly as written (`GT:GQ:DP:AD`)   |
+| `format_keys` | Utf8       | the FORMAT column as written (`GT:GQ:DP:AD`); a lone `.` is stored as NULL |
 | `format_raw`  | Utf8       | the sample column exactly as written (`0/1:35:10:5,5`) |
 | `info_raw`    | Utf8       | the INFO column exactly as written; duplicated across ALTs |
 | `source_ordinal` | UInt64  | 0-based index of the source record in its file; rows of one record share it |
