@@ -183,6 +183,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Updated the locked `url` crate from 2.5.8 to 2.5.9 (and `form_urlencoded`
+  to 1.2.3), fixing RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on
+  nested `blob:` URLs). Lockfile-only change.
 - Updated the transitive `zstd` 0.13.4, `zstd-safe` 7.4.0 and `zstd-sys`
   2.1.2 (via `arrow-ipc` and `lance-encoding`) in the lockfile, fixing
   RUSTSEC-2026-0391, RUSTSEC-2026-0398, RUSTSEC-2026-0403 and
